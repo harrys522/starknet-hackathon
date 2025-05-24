@@ -4,7 +4,7 @@ use snforge_std::{declare, ContractClassTrait, DeclareResultTrait};
 
 // Import our contracts
 use moosh_id::keyregistry::FalconPublicKeyRegistry::{
-    IFalconPublicKeyRegistryDispatcher, PK_COEFFICIENT_COUNT,
+    IFalconPublicKeyRegistryDispatcher,
     IFalconPublicKeyRegistryDispatcherTrait
 };
 use moosh_id::addressverifier::FalconSignatureVerifier::{

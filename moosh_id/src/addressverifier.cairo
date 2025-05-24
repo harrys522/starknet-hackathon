@@ -35,11 +35,13 @@ pub mod FalconSignatureVerifier {
 
     // --- Dependency Imports ---
     use moosh_id::keyregistry::FalconPublicKeyRegistry::{
-        // This constant should match the one used in KeyRegistry and for verify_uncompressed
-        // If it's defined in moosh_id, import it. Otherwise, define it consistently here.
-        PK_COEFFICIENT_COUNT, IFalconPublicKeyRegistryDispatcher,
+        IFalconPublicKeyRegistryDispatcher,
         IFalconPublicKeyRegistryDispatcherTrait,
     };
+
+    // --- Constants ---
+    const PK_SIZE_512: u32 = 512;
+    const PK_SIZE_1024: u32 = 1024;
 
     // --- Starknet Imports ---
     use starknet::event::{EventEmitter};
@@ -118,21 +120,16 @@ pub mod FalconSignatureVerifier {
             };
 
             let pk_coeffs_array = key_registry_dispatcher.get_public_key(key_hash);
+            let n_val: u32 = pk_coeffs_array.len().try_into().unwrap();
+            
+            // Validate key size
+            assert(n_val == PK_SIZE_512 || n_val == PK_SIZE_1024, 'Invalid PK size');
+            assert(s1_coeffs_span.len() == pk_coeffs_array.len(), 's1 length mismatch');
+            assert(msg_point_span.len() == pk_coeffs_array.len(), 'msg_point length');
 
-            let n_val: u32 = PK_COEFFICIENT_COUNT;
-            let n_usize: usize = n_val.try_into().unwrap();
+            let msg_hash_part = InternalImpl::get_msg_hash_part(msg_point_span);
 
-            assert(pk_coeffs_array.len() == n_usize, 'PK length mismatch');
-            assert(s1_coeffs_span.len() == n_usize, 's1 length mismatch');
-            assert(msg_point_span.len() == n_usize, 'msg_point length');
-
-            let msg_hash_part = if msg_point_span.len() > 0 {
-                (*msg_point_span.at(0)).into()
-            } else {
-                0.into()
-            };
-
-            match verify_uncompressed::<PK_COEFFICIENT_COUNT>(
+            match verify_uncompressed(
                 s1_coeffs_span, pk_coeffs_array.span(), msg_point_span, n_val
             ) {
                 Result::Ok(()) => {

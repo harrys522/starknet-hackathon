@@ -12,7 +12,8 @@ pub mod FalconPublicKeyRegistry {
     use starknet::storage::{Map, StorageMapReadAccess, StorageMapWriteAccess};
 
     // --- Constants ---
-    pub const PK_COEFFICIENT_COUNT: u32 = 1024; // For Falcon-1024
+    pub const PK_SIZE_512: u32 = 512;
+    pub const PK_SIZE_1024: u32 = 1024;
 
     // --- Storage ---
     #[storage]
@@ -59,8 +60,9 @@ pub mod FalconPublicKeyRegistry {
     #[abi(embed_v0)]
     impl FalconPublicKeyRegistryImpl of IFalconPublicKeyRegistry<ContractState> {
         fn register_public_key(ref self: ContractState, pk_coefficients_span: Span<u16>) -> bool {
-            let expected_len: usize = PK_COEFFICIENT_COUNT.try_into().unwrap();
-            assert(pk_coefficients_span.len() == expected_len, 'Invalid PK coeff count');
+            // Validate key size (must be either 512 or 1024)
+            let pk_len: u32 = pk_coefficients_span.len().try_into().unwrap();
+            assert(pk_len == PK_SIZE_512 || pk_len == PK_SIZE_1024, 'Invalid PK size');
 
             let pk_coeffs_felt252_array = u16_span_to_felt252_array(pk_coefficients_span);
             let key_hash = poseidon_hash_span(pk_coeffs_felt252_array.span());
@@ -72,15 +74,15 @@ pub mod FalconPublicKeyRegistry {
             // PK_COEFFICIENT_COUNT)
             if existing_pk_length != 0 {
                 assert(
-                    existing_pk_length == PK_COEFFICIENT_COUNT, 'Registered length mismatch',
+                    existing_pk_length == PK_SIZE_512 || existing_pk_length == PK_SIZE_1024, 'Registered length mismatch',
                 ); // Optional: sanity check
                 return false; // Key already exists
             }
 
             // Key not found, proceed with registration
-            self.pk_metadata.write(key_hash, PK_COEFFICIENT_COUNT);
+            self.pk_metadata.write(key_hash, pk_len);
             let mut i: u32 = 0;
-            while i < PK_COEFFICIENT_COUNT {
+            while i < pk_len {
                 let coeff_val = *pk_coefficients_span.at(i.try_into().unwrap());
                 self.pk_coefficients.write((key_hash, i), coeff_val);
                 i += 1;
@@ -90,7 +92,7 @@ pub mod FalconPublicKeyRegistry {
                 .emit(
                     Event::PublicKeyRegistered(
                         PublicKeyRegisteredEventData {
-                            key_hash, pk_coefficient_count: PK_COEFFICIENT_COUNT,
+                            key_hash, pk_coefficient_count: pk_len,
                         },
                     ),
                 );
@@ -109,11 +111,11 @@ pub mod FalconPublicKeyRegistry {
             }
 
             // If we reach here, the key was found.
-            assert(stored_length == PK_COEFFICIENT_COUNT, 'Stored PK length mismatch');
+            assert(stored_length == PK_SIZE_512 || stored_length == PK_SIZE_1024, 'Stored PK length mismatch');
 
             let mut coefficients_array = ArrayTrait::new();
             let mut i: u32 = 0;
-            while i < PK_COEFFICIENT_COUNT { // Loop up to the known PK_COEFFICIENT_COUNT
+            while i < stored_length { // Loop up to the known PK_COEFFICIENT_COUNT
                 let coeff_val = self.pk_coefficients.read((key_hash, i));
                 ArrayTrait::append(ref coefficients_array, coeff_val);
                 i += 1;
