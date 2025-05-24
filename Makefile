@@ -43,8 +43,9 @@ $(MSG_DIR):
 
 # Generate key only (without running tests or setup)
 generate-arguments: $(KEY_DIR)
-	$(VENV_PYTHON) scripts/generate_args.py --n $(N) --num_signatures 1 > testdata/args_512_1.json
-	@echo "Key generated and saved to $(KEY_FILE)"
+	$(VENV_PYTHON) scripts/generate_inputs.py --n 512 --num_signatures 1
+	$(VENV_PYTHON) scripts/generate_inputs.py --n 1024 --num_signatures 1
+	@echo "Key generated and saved to moosh_id/tests/inputs/falcon_test_vectors_n512.cairo and moosh_id/tests/inputs/falcon_test_vectors_n1024.cairo"
 
 # Generate and register a key (with setup)
 key: setup
