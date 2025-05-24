@@ -2,14 +2,14 @@ use core::array::{ArrayTrait, Span, SpanTrait};
 use core::poseidon::poseidon_hash_span;
 use core::traits::{Into, TryInto};
 
-use moosh_id::FalconPublicKeyRegistry::{
+use moosh_id::keyregistry::FalconPublicKeyRegistry::{
     PK_COEFFICIENT_COUNT, IFalconPublicKeyRegistryDispatcher,
     IFalconPublicKeyRegistryDispatcherTrait,
 };
 use snforge_std::{declare, ContractClassTrait, DeclareResultTrait};
 
 /// Deploys a new instance of the FalconPublicKeyRegistry contract
-pub fn deploy() -> IFalconPublicKeyRegistryDispatcher {
+pub fn deploy_registry() -> IFalconPublicKeyRegistryDispatcher {
     let contract = declare("FalconPublicKeyRegistry").unwrap().contract_class();
     let (contract_address, _) = contract.deploy(@array![]).unwrap();
     IFalconPublicKeyRegistryDispatcher { contract_address }
@@ -36,3 +36,5 @@ pub fn generate_dummy_pk(start_val: u16) -> Array<u16> {
     }
     pk_vec
 } 
+
+// 
