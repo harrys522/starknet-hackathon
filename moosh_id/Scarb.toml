@@ -9,9 +9,10 @@ sierra = true
 casm = true
 
 [dependencies]
-starknet = "2.11.4"
+starknet = "2.3.1"
 cairo_test = "2.11.4"
 falcon = { git = "https://github.com/keep-starknet-strange/s2morrow" }
+openzeppelin = { git = "https://github.com/OpenZeppelin/cairo-contracts.git" }
 
 [dev-dependencies]
 snforge_std = "0.43.1"
