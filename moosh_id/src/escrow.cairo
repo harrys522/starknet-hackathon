@@ -259,6 +259,13 @@ pub mod Escrow {
             let strk_addr = self.strk_token.read();
             let strk = IERC20Dispatcher { contract_address: strk_addr };
             let client = self.client.read();
+            let caller = get_caller_address();
+            
+            // Debug assertions
+            assert(caller == client, 'Caller not client');
+            let zero_address: ContractAddress = 0.try_into().unwrap();
+            assert(strk_addr != zero_address, 'Invalid token address');
+            assert(this_contract != zero_address, 'Invalid escrow address');
 
             // Convert amount to u256 for token operations
             let amount_u256 = InternalFunctions::to_u256(total_amount);
@@ -271,8 +278,18 @@ pub mod Escrow {
             let allowance = strk.allowance(client, this_contract);
             assert(allowance >= amount_u256, 'Insufficient allowance');
             
+            // Debug: Store pre-transfer allowance and verify it matches
+            let pre_transfer_allowance = strk.allowance(client, this_contract);
+            assert(pre_transfer_allowance == allowance, 'Allowance changed unexpectedly');
+            assert(pre_transfer_allowance >= amount_u256, 'Pre-transfer not allowed');
+            
             // Transfer STRK tokens from client to contract
-            strk.transfer_from(client, this_contract, amount_u256);
+            let transfer_success = strk.transfer_from(client, this_contract, amount_u256);
+            assert(transfer_success, 'Transfer failed');
+            
+            // Debug: Verify allowance was consumed
+            let post_transfer_allowance = strk.allowance(client, this_contract);
+            assert(post_transfer_allowance == pre_transfer_allowance - amount_u256, 'Allowance not properly consumed');
             
             // Set the service start block after deposit
             let current_block = starknet::get_block_number();

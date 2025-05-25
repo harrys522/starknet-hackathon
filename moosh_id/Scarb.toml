@@ -35,7 +35,6 @@ unstable-add-statements-code-locations-debug-info = true
 unstable-add-statements-functions-debug-info = true
 
 [tool.snforge]
-exit_first = true
 backtrace = true
 
 [tool.snforge.env]
