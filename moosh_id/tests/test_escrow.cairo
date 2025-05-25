@@ -295,8 +295,6 @@ fn deploy_verifier(key_registry_addr: ContractAddress) -> IFalconSignatureVerifi
 // Helper function to deploy the escrow contract
 fn deploy_escrows() -> IEscrowDispatcher {
     // Get the caller address
-    let user_address: ContractAddress = 0x123.try_into().unwrap();
-    
     // First deploy the key registry and verifier
     let key_registry = deploy_registry();
     
@@ -308,7 +306,6 @@ fn deploy_escrows() -> IEscrowDispatcher {
     
     let pk_felts = pk_u16_span_to_felt252_array_for_hash(pk_span);
     let key_hash = poseidon_hash_span(pk_felts.span());
-    start_cheat_caller_address_global(caller_address: user_address);
     // Set up STRK token balance
   
     
@@ -336,7 +333,7 @@ fn deploy_escrows() -> IEscrowDispatcher {
 #[test]
 fn test_deploy_escrow() {
     let user_address: ContractAddress = 0x123.try_into().unwrap();
-  set_balance(user_address, 1_000_000_000_000_000, Token::STRK);
+    set_balance(user_address, 1_000_000_000_000_000, Token::STRK);
     start_cheat_caller_address_global(caller_address: user_address);
     let escrow = deploy_escrows();
     assert(!escrow.contract_address.is_zero(), 'Contract not deployed');
