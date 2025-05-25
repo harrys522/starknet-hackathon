@@ -29,7 +29,7 @@ pub mod FalconSignatureVerifier {
     use core::option::OptionTrait;
     use core::traits::{Into, TryInto};
     use falcon::falcon::{FalconVerificationError, verify_uncompressed};
-    use starknet::{ContractAddress, get_contract_address};
+    use starknet::{ContractAddress};
     use starknet::syscalls::emit_event_syscall;
     use starknet::SyscallResultTrait;
 

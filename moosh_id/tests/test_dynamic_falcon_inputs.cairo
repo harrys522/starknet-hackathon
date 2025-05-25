@@ -1,10 +1,8 @@
-use core::array::ArrayTrait;
 use core::poseidon::poseidon_hash_span;
 use snforge_std::{declare, ContractClassTrait, DeclareResultTrait};
 
 // Import our contracts
 use moosh_id::keyregistry::FalconPublicKeyRegistry::{
-    IFalconPublicKeyRegistryDispatcher,
     IFalconPublicKeyRegistryDispatcherTrait
 };
 use moosh_id::addressverifier::FalconSignatureVerifier::{

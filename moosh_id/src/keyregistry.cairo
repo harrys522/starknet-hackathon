@@ -56,7 +56,6 @@ pub mod FalconPublicKeyRegistry {
     }
 
     // --- Contract Implementation ---
-    // The #[starknet::abi(embed_v0)] attribute requires a correctly configured Starknet project.
     #[abi(embed_v0)]
     impl FalconPublicKeyRegistryImpl of IFalconPublicKeyRegistry<ContractState> {
         fn register_public_key(ref self: ContractState, pk_coefficients_span: Span<u16>) -> bool {

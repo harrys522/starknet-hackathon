@@ -2,7 +2,6 @@ use core::array::ArrayTrait;
 use core::traits::TryInto;
 
 use moosh_id::keyregistry::FalconPublicKeyRegistry::{
-    IFalconPublicKeyRegistryDispatcher,
     IFalconPublicKeyRegistryDispatcherTrait,
     PK_SIZE_512
 };
