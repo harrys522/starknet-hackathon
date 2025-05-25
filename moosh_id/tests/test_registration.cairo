@@ -1,17 +1,18 @@
 use core::array::{ArrayTrait, Span};
 use core::poseidon::poseidon_hash_span;
 
-use moosh_id::FalconPublicKeyRegistry::{
+use moosh_id::keyregistry::FalconPublicKeyRegistry::{
     IFalconPublicKeyRegistryDispatcher,
     IFalconPublicKeyRegistryDispatcherTrait,
+    PK_SIZE_512
 };
 
-use super::test_utils::{deploy, generate_dummy_pk, pk_u16_span_to_felt252_array_for_hash};
+use super::test_utils::{deploy_registry, generate_dummy_pk, pk_u16_span_to_felt252_array_for_hash};
 
 #[test]
 fn test_register_and_get_pk_successfully() {
-    let mut dispatcher = deploy();
-    let pk_to_register_original = generate_dummy_pk(100_u16);
+    let mut dispatcher = deploy_registry();
+    let pk_to_register_original = generate_dummy_pk(100_u16, PK_SIZE_512);
 
     // Register the public key
     dispatcher.register_public_key(pk_to_register_original.span());
@@ -39,11 +40,12 @@ fn test_register_and_get_pk_successfully() {
     }
 }
 
-#[should_panic]
 #[test]
 fn test_register_duplicate_pk_panics() {
-    let mut dispatcher = deploy();
-    let pk_to_register = generate_dummy_pk(200_u16);
-    dispatcher.register_public_key(pk_to_register.span());
-    dispatcher.register_public_key(pk_to_register.span());
+    let mut dispatcher = deploy_registry();
+    let pk_to_register = generate_dummy_pk(200_u16, PK_SIZE_512);
+    let success = dispatcher.register_public_key(pk_to_register.span());
+    assert(success, 'First registration succeeds');
+    let failed_successfully = dispatcher.register_public_key(pk_to_register.span());
+    assert(!failed_successfully, 'Second registration should fail');
 } 

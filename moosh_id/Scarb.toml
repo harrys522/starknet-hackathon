@@ -10,8 +10,8 @@ casm = true
 
 [dependencies]
 starknet = "2.11.4"
-falcon = { git = "https://github.com/keep-starknet-strange/s2morrow" }
 cairo_test = "2.11.4"
+falcon = { git = "https://github.com/keep-starknet-strange/s2morrow" }
 
 [dev-dependencies]
 snforge_std = "0.43.1"
