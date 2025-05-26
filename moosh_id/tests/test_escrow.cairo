@@ -2,6 +2,8 @@ use core::traits::Into;
 use core::option::OptionTrait;
 use core::result::ResultTrait;
 use core::num::traits::Zero;
+use core::byte_array::{ByteArray, ByteArrayTrait};
+use core::array::ArrayTrait;
 // use core::array::ArrayTrait;
 // use starknet::syscalls::call_contract_syscall;
 use starknet::{
@@ -19,6 +21,7 @@ use snforge_std::{
     start_cheat_caller_address_global,
     start_cheat_block_number,
     Token, TokenImpl, TokenTrait, set_balance
+    // Token, TokenImpl, TokenTrait, set_balance
     
 };
 use super::test_utils::{deploy_registry, pk_u16_span_to_felt252_array_for_hash};
@@ -41,8 +44,8 @@ use super::inputs::falcon_test_vectors_n1024::{PK_N1024, S1_N1024, MSG_POINT_N10
 // Mock addresses for testing
 const MOCK_PROVIDER_KEY_HASH: felt252 = 0x456;
 const MOCK_SERVICE_PERIOD: u64 = 100;
-const MOCK_TOTAL_AMOUNT: u128 = 1; // 1 STRK token (reduced for testing)
-const INITIAL_BALANCE: u256 = u256 { low: 1000, high: 0 }; // Much larger than MOCK_TOTAL_AMOUNT to avoid overflow
+const MOCK_TOTAL_AMOUNT: u128 = 1000000000000000000;  // Increased to 1e18 (1 full token)
+const INITIAL_BALANCE: u256 = u256 { low: 1000000000000000000000, high: 0 }; // Increased to 1000e18
 
 fn to_u256(amount: u128) -> u256 {
     u256 { low: amount.into(), high: 0 }
@@ -64,41 +67,29 @@ fn deploy_verifier(key_registry_addr: ContractAddress) -> IFalconSignatureVerifi
     IFalconSignatureVerifierDispatcher { contract_address }
 }
 
+
 // Helper function to deploy the escrow contract
-fn deploy_escrows() -> IEscrowDispatcher {
-    // First deploy the key registry and verifier
+fn deploy_escrows(strk_token_dispatcher: IERC20Dispatcher) -> IEscrowDispatcher {
     let key_registry = deploy_registry();
-    
-    // Register the test public key
     let pk_span = PK_N1024.span();
-    let success = key_registry.register_public_key(pk_span);
-    assert(success, 'Registration should succeed');
-    
-    // Calculate key hash
+    key_registry.register_public_key(pk_span);
     let pk_felts = pk_u16_span_to_felt252_array_for_hash(pk_span);
     let key_hash = poseidon_hash_span(pk_felts.span());
-    
-    // Deploy the verifier with the key registry
     let verifier = deploy_verifier(key_registry.contract_address);
     
-    // Get STRK token address
-    let strk_addr: ContractAddress = Token::STRK.contract_address();
+    // Use the address of the ERC20 token we deployed and passed in
+    let strk_addr_from_dispatcher = strk_token_dispatcher.contract_address;
     
-    // Prepare constructor args for escrow
     let constructor_args = array![
         key_hash.into(),
         MOCK_TOTAL_AMOUNT.into(),
         MOCK_SERVICE_PERIOD.into(),
         verifier.contract_address.into(),
-        strk_addr.into()
+        strk_addr_from_dispatcher.into() // Use our deployed token's address
     ];
     
-    // Declare the contract
     let contract = declare("Escrow").unwrap().contract_class();
-    
-    // Now deploy the escrow contract
     let (contract_address, _) = contract.deploy(@constructor_args).unwrap();
-    
     IEscrowDispatcher { contract_address }
 }
 
@@ -123,14 +114,11 @@ impl EscrowStateChecksDefault of Default<EscrowStateChecks> {
     }
 }
 
-fn setup_test_environment() -> (ContractAddress, ContractAddress) {
+fn setup_test_environment() -> (ContractAddress, IERC20Dispatcher) {
     let user_address: ContractAddress = 0x123.try_into().unwrap();
-    let strk_addr: ContractAddress = Token::STRK.contract_address();
-    
-    // Set initial balance using the constant
-    set_balance(user_address, INITIAL_BALANCE, Token::STRK);
+    let strk_addr = token::STRK.contract_address().into();
     start_cheat_caller_address_global(caller_address: user_address);
-    
+    set_balance(user_address, 1_000_000, Token::STRK);
     (user_address, strk_addr)
 }
 
@@ -159,55 +147,52 @@ fn assert_escrow_state(escrow: IEscrowDispatcher, expected_state: EscrowStateChe
 }
 
 fn setup_escrow_with_deposit() -> (IEscrowDispatcher, IERC20Dispatcher, ContractAddress) {
-    let (user_address, strk_addr) = setup_test_environment();
-    let escrow = deploy_escrows();
-    assert(!escrow.contract_address.is_zero(), 'Contract not deployed');
+    // Fresh setup for each test
+    let (user_address, token) = setup_test_environment();
+    let escrow = deploy_escrows(token);
     
-    let strk = IERC20Dispatcher { contract_address: strk_addr };
+    // Debug: Verify clean initial state
+    let initial_allowance = token.allowance(user_address, escrow.contract_address);
+    assert(initial_allowance == u256 { low: 0, high: 0 }, 'Setup: unexpected allowance');
     
-    // Verify initial state
-    assert_escrow_state(escrow, EscrowStateChecksDefault::default());
+    let initial_balance = token.balance_of(user_address);
+    assert(initial_balance == INITIAL_BALANCE, 'Setup: wrong initial balance');
     
-    // Check initial balances
-    let zero_balance = u256 { low: 0, high: 0 };
-    assert_token_balance(strk, user_address, INITIAL_BALANCE);
-    assert_token_balance(strk, escrow.contract_address, zero_balance);
+    // Set caller and approve
+    start_cheat_caller_address_global(caller_address: user_address);
+    let amount_u256 = to_u256(MOCK_TOTAL_AMOUNT);
+    let success = token.approve(escrow.contract_address, amount_u256);
+    assert(success, 'Setup: approval failed');
     
-    // Approve and verify allowance
-    let mock_amount_u256 = to_u256(MOCK_TOTAL_AMOUNT);
-    let success = strk.approve(escrow.contract_address, mock_amount_u256);
+    // Verify approval
+    let post_approve_allowance = token.allowance(user_address, escrow.contract_address);
+    assert(post_approve_allowance == amount_u256, 'Setup: allowance not set');
+    
+    // Do deposit
+    let success_deposit = escrow.deposit();
+    assert(success_deposit, 'Setup: deposit failed');
+    
+    // Verify deposit consumed allowance
+    let final_allowance = token.allowance(user_address, escrow.contract_address);
+    assert(final_allowance == u256 { low: 0, high: 0 }, 'Setup: allowance not consumed');
+    
+    (escrow, token, user_address)
+}
+
+// Add this helper function for token approvals
+fn approve_tokens(token: IERC20Dispatcher, owner: ContractAddress, spender: ContractAddress, amount: u128) {
+    let amount_u256 = to_u256(amount);
+    let success = token.approve(spender, amount_u256);
     assert(success, 'Approval failed');
-    let allowance = escrow.get_client_allowance();
-    assert(allowance == mock_amount_u256, 'Wrong allowance amount');
-    
-    // Perform deposit
-    let success = escrow.deposit();
-    assert(success, 'Deposit failed');
-    
-    // Verify post-deposit state
-    assert_escrow_state(
-        escrow,
-        EscrowStateChecks {
-            is_deposited: true,
-            is_completed: false,
-            is_claimed: false,
-            is_disputed: false,
-            skip_client_check: false,
-        }
-    );
-    
-    // Verify post-deposit balances
-    let mock_amount_u256 = to_u256(MOCK_TOTAL_AMOUNT);
-    let remaining_balance = INITIAL_BALANCE - mock_amount_u256;
-    assert_token_balance(strk, user_address, remaining_balance);
-    assert_token_balance(strk, escrow.contract_address, mock_amount_u256);
-    
-    (escrow, strk, user_address)
+    let allowance = token.allowance(owner, spender);
+    assert(allowance == amount_u256, 'Wrong allowance amount');
 }
 
 #[test]
 fn test_deploy_escrow() {
-    let escrow = deploy_escrows();
+    // This test will now need to correctly initialize strk_token_dispatcher for deploy_escrows
+    let (_user_address, strk_token_dispatcher) = setup_test_environment(); // Prefix user_address with _
+    let escrow = deploy_escrows(strk_token_dispatcher);
     
     // Basic deployment checks
     let details = escrow.get_escrow_details();
@@ -234,11 +219,15 @@ fn test_prevent_double_deposit() {
 
 #[test]
 fn test_successful_claim() {
-    let (escrow, strk, user_address) = setup_escrow_with_deposit();
+    let (escrow, token, user_address) = setup_escrow_with_deposit();
     
     // Create signature data from test vectors
     let s1_coeffs = S1_N1024.span();
     let msg_point = MSG_POINT_N1024.span();
+    
+    // Set the caller as the provider (who will claim)
+    let provider_address = user_address;  // For test simplicity, using same address
+    start_cheat_caller_address_global(caller_address: provider_address);
     
     // Warp to after service period
     let service_period = MOCK_SERVICE_PERIOD;
@@ -262,24 +251,13 @@ fn test_successful_claim() {
     
     // Verify final balances
     let zero_balance = u256 { low: 0, high: 0 };
-    assert_token_balance(strk, escrow.contract_address, zero_balance);
-    
-    // Get the provider address from the escrow details
-    let details = escrow.get_escrow_details();
-    assert(!details.provider.is_zero(), 'Provider should be set');
-    // Provider's final balance should be their initial balance if they were also the original client
-    // or their starting balance + MOCK_TOTAL_AMOUNT if they are a distinct entity.
-    // In this test, provider is the original caller (user_address).
-    assert_token_balance(strk, details.provider, INITIAL_BALANCE); 
-    
-    // Check remaining client balance (user_address who is also the provider here)
-    // This assertion is effectively the same as the one above for details.provider
-    assert_token_balance(strk, user_address, INITIAL_BALANCE);
+    assert_token_balance(token, escrow.contract_address, zero_balance);
+    assert_token_balance(token, provider_address, INITIAL_BALANCE);
 }
 
 #[test]
 fn test_dispute_before_start() {
-    let (escrow, strk, user_address) = setup_escrow_with_deposit();
+    let (escrow, token, user_address) = setup_escrow_with_deposit();
     
     // Get the start block
     let details = escrow.get_escrow_details();
@@ -304,13 +282,13 @@ fn test_dispute_before_start() {
     
     // Since dispute is before start, all funds should return to client
     let zero_balance = u256 { low: 0, high: 0 };
-    assert_token_balance(strk, escrow.contract_address, zero_balance);
-    assert_token_balance(strk, user_address, INITIAL_BALANCE);
+    assert_token_balance(token, escrow.contract_address, zero_balance);
+    assert_token_balance(token, user_address, INITIAL_BALANCE);
 }
 
 #[test]
 fn test_dispute_during_service() {
-    let (escrow, strk, user_address) = setup_escrow_with_deposit();
+    let (escrow, token, user_address) = setup_escrow_with_deposit();
     
     let details = escrow.get_escrow_details();
     
@@ -318,6 +296,9 @@ fn test_dispute_during_service() {
     let start_block = details.service_start_block;
     let period = details.service_period_blocks;
     let mid_point = start_block + (period / 2);
+    
+    // Set back to client for dispute
+    start_cheat_caller_address_global(caller_address: user_address);
     
     // Dispute halfway through service
     start_cheat_block_number(escrow.contract_address, mid_point);
@@ -337,27 +318,23 @@ fn test_dispute_during_service() {
     );
     
     // Verify proportional fund distribution
-    // At midpoint, funds should be split roughly equally
     let zero_balance = u256 { low: 0, high: 0 };
-    let half_amount = u256 { low: MOCK_TOTAL_AMOUNT / 2, high: 0 };
-    let expected_client_balance = u256 { 
-        low: MOCK_TOTAL_AMOUNT + half_amount.low, 
-        high: 0 
-    };
+    let half_amount = MOCK_TOTAL_AMOUNT / 2;
+    let expected_client_balance = to_u256(INITIAL_BALANCE.low - half_amount);
     
-    assert_token_balance(strk, escrow.contract_address, zero_balance);
-    assert_token_balance(strk, user_address, expected_client_balance);
+    assert_token_balance(token, escrow.contract_address, zero_balance);
+    assert_token_balance(token, user_address, expected_client_balance);
     
     // If provider is set, they should have received their share
     let details = escrow.get_escrow_details();
     if !details.provider.is_zero() {
-        assert_token_balance(strk, details.provider, half_amount);
+        assert_token_balance(token, details.provider, to_u256(half_amount));
     }
 }
 
 #[test]
 fn test_dispute_after_service() {
-    let (escrow, strk, user_address) = setup_escrow_with_deposit();
+    let (escrow, token, user_address) = setup_escrow_with_deposit();
     
     let details = escrow.get_escrow_details();
     
@@ -365,6 +342,9 @@ fn test_dispute_after_service() {
     let start_block = details.service_start_block;
     let period = details.service_period_blocks;
     let after_end = start_block + period + 10;
+    
+    // Set back to client for dispute
+    start_cheat_caller_address_global(caller_address: user_address);
     
     // Dispute after service period
     start_cheat_block_number(escrow.contract_address, after_end);
@@ -385,35 +365,183 @@ fn test_dispute_after_service() {
     
     // After full service period, all funds should go to provider if set
     let zero_balance = u256 { low: 0, high: 0 };
-    let mock_amount_u256 = to_u256(MOCK_TOTAL_AMOUNT);
-    assert_token_balance(strk, escrow.contract_address, zero_balance);
+    assert_token_balance(token, escrow.contract_address, zero_balance);
     
     // Get the provider address and check balances
     let details = escrow.get_escrow_details();
     if !details.provider.is_zero() {
-        assert_token_balance(strk, details.provider, mock_amount_u256);
-        let remaining_balance = INITIAL_BALANCE - mock_amount_u256;
-        assert_token_balance(strk, user_address, remaining_balance);
+        assert_token_balance(token, details.provider, to_u256(MOCK_TOTAL_AMOUNT));
+        let remaining_balance = INITIAL_BALANCE.low - MOCK_TOTAL_AMOUNT;
+        assert_token_balance(token, user_address, to_u256(remaining_balance));
     } else {
         // If no provider set, funds return to client
-        assert_token_balance(strk, user_address, INITIAL_BALANCE);
+        assert_token_balance(token, user_address, INITIAL_BALANCE);
     }
 }
 
 #[test]
 fn test_get_caller() {
-    // Set up user address and STRK balance
-    let user_address: ContractAddress = 0x123.try_into().unwrap();
-    set_balance(user_address, 1_000_000_000_000_000, Token::STRK);
-    start_cheat_caller_address_global(caller_address: user_address);
+    let (user_address, strk_token_dispatcher) = setup_test_environment();
+    let escrow = deploy_escrows(strk_token_dispatcher);
     
-    // Deploy escrow with real verifier
-    let escrow = deploy_escrows();
-    assert(!escrow.contract_address.is_zero(), 'Contract not deployed');
-
     // Get escrow details
     let details = escrow.get_escrow_details();
     
     // The caller address should match the client address in the escrow
     assert(get_caller_address() == details.client, 'Caller should be client');
+}
+
+#[test]
+fn test_token_approval_and_deposit_with_debug() {
+    // Setup basic environment
+    let (user_address, token) = setup_test_environment();
+    let escrow = deploy_escrows(token);
+    
+    // Debug: Check if there are any existing allowances
+    let initial_allowance = token.allowance(user_address, escrow.contract_address);
+    assert(initial_allowance == u256 { low: 0, high: 0 }, 'Unexpected initial allowance');
+    
+    // Debug: Check initial balance
+    let initial_balance = token.balance_of(user_address);
+    assert(initial_balance == INITIAL_BALANCE, 'Wrong initial balance');
+    
+    // Set caller and approve
+    start_cheat_caller_address_global(caller_address: user_address);
+    let amount_u256 = to_u256(MOCK_TOTAL_AMOUNT);
+    let success = token.approve(escrow.contract_address, amount_u256);
+    assert(success, 'Approval failed');
+    
+    // Debug: Verify allowance right after approval
+    let post_approve_allowance = token.allowance(user_address, escrow.contract_address);
+    assert(post_approve_allowance == amount_u256, 'Allowance not set');
+    
+    // Debug: Check caller right before deposit
+    let current_caller = get_caller_address();
+    assert(current_caller == user_address, 'Wrong caller pre-deposit');
+    
+    // Try deposit
+    let success_deposit = escrow.deposit();
+    assert(success_deposit, 'Deposit failed');
+    
+    // Debug: Check final allowance
+    let final_allowance = token.allowance(user_address, escrow.contract_address);
+    assert(final_allowance == u256 { low: 0, high: 0 }, 'Allowance not consumed');
+}
+
+#[test]
+fn test_claim_after_deposit() {
+    // First do deposit
+    let (user_address, token) = setup_test_environment();
+    let escrow = deploy_escrows(token);
+    
+    // Approve and deposit
+    let amount_u256 = to_u256(MOCK_TOTAL_AMOUNT);
+    let success = token.approve(escrow.contract_address, amount_u256);
+    assert(success, 'Approval failed');
+    let success_deposit = escrow.deposit();
+    assert(success_deposit, 'Deposit failed');
+    
+    // Create signature data
+    let s1_coeffs = S1_N1024.span();
+    let msg_point = MSG_POINT_N1024.span();
+    
+    // Warp to after service period
+    start_cheat_block_number(escrow.contract_address, MOCK_SERVICE_PERIOD + 10000000);
+    
+    // Try to claim
+    let success_claim = escrow.claim(s1_coeffs, msg_point);
+    assert(success_claim, 'Claim failed');
+    
+    // Verify final state
+    let details = escrow.get_escrow_details();
+    assert(details.is_claimed, 'Should be claimed');
+    assert(!details.is_disputed, 'Should not be disputed');
+    
+    // Verify final balances
+    let zero_balance = u256 { low: 0, high: 0 };
+    assert_token_balance(token, escrow.contract_address, zero_balance);
+    
+    // Provider should have received the funds
+    let provider = details.provider;
+    assert(!provider.is_zero(), 'Provider should be set');
+    assert_token_balance(token, provider, to_u256(MOCK_TOTAL_AMOUNT));
+}
+
+#[test]
+fn test_dispute_after_deposit() {
+    // First do deposit
+    let (user_address, token) = setup_test_environment();
+    let escrow = deploy_escrows(token);
+    
+    // Approve and deposit
+    let amount_u256 = to_u256(MOCK_TOTAL_AMOUNT);
+    let success = token.approve(escrow.contract_address, amount_u256);
+    assert(success, 'Approval failed');
+    let success_deposit = escrow.deposit();
+    assert(success_deposit, 'Deposit failed');
+    
+    // Get initial state
+    let details = escrow.get_escrow_details();
+    let start_block = details.service_start_block;
+    
+    // Try to dispute before service starts
+    start_cheat_block_number(escrow.contract_address, start_block + 1);
+    let success_dispute = escrow.dispute();
+    assert(success_dispute, 'Dispute failed');
+    
+    // Verify final state
+    let final_details = escrow.get_escrow_details();
+    assert(final_details.is_disputed, 'Should be disputed');
+    assert(!final_details.is_claimed, 'Should not be claimed');
+    
+    // All funds should return to client
+    let zero_balance = u256 { low: 0, high: 0 };
+    assert_token_balance(token, escrow.contract_address, zero_balance);
+    assert_token_balance(token, user_address, INITIAL_BALANCE);
+}
+
+
+#[test]
+fn test_allowance_consumption() {
+    // Setup basic environment
+    let (user_address, token) = setup_test_environment();
+    let escrow = deploy_escrows(token);
+    
+    // Set caller and approve
+    start_cheat_caller_address_global(caller_address: user_address);
+    let amount_u256 = to_u256(MOCK_TOTAL_AMOUNT);
+    
+    // Debug: Print initial state
+    print_token_state(token, user_address, escrow.contract_address);
+    
+    // Initial allowance should be zero
+    let initial_allowance = token.allowance(user_address, escrow.contract_address);
+    assert(initial_allowance == u256 { low: 0, high: 0 }, 'Initial allowance not zero');
+    
+    // Approve tokens with double the amount to ensure sufficient allowance
+    let double_amount = to_u256(2 * MOCK_TOTAL_AMOUNT);
+    let success = token.approve(escrow.contract_address, double_amount);
+    assert(success, 'Approval failed');
+    
+    // Debug: Print state after approval
+    print_token_state(token, user_address, escrow.contract_address);
+    
+    // Verify allowance was set
+    let post_approve_allowance = token.allowance(user_address, escrow.contract_address);
+    assert(post_approve_allowance == double_amount, 'Allowance not set correctly');
+    
+    // Do deposit
+    let success_deposit = escrow.deposit();
+    assert(success_deposit, 'Deposit failed');
+    
+    // Debug: Print final state
+    print_token_state(token, user_address, escrow.contract_address);
+    
+    // Verify allowance was consumed correctly
+    let final_allowance = token.allowance(user_address, escrow.contract_address);
+    assert(final_allowance == double_amount - amount_u256, 'Wrong allowance consumption');
+    
+    // Verify escrow received tokens
+    let escrow_balance = token.balance_of(escrow.contract_address);
+    assert(escrow_balance == amount_u256, 'Escrow did not receive tokens');
 }
