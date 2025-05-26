@@ -9,8 +9,11 @@ pub mod FalconPublicKeyRegistry {
     use core::panic_with_felt252;
     use core::poseidon::poseidon_hash_span;
     use core::traits::{Into, TryInto};
+    use starknet::storage::{
+        Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess,
+        StoragePointerWriteAccess,
+    };
     use starknet::{ContractAddress, get_caller_address};
-    use starknet::storage::{Map, StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess, StoragePointerWriteAccess};
 
     // --- Constants ---
     pub const PK_SIZE_512: u32 = 512;
@@ -87,13 +90,15 @@ pub mod FalconPublicKeyRegistry {
             // If existing_pk_length is not 0, it means the key was found
             if existing_pk_length != 0 {
                 assert(
-                    existing_pk_length == PK_SIZE_512 || existing_pk_length == PK_SIZE_1024, 'Registered length mismatch',
+                    existing_pk_length == PK_SIZE_512 || existing_pk_length == PK_SIZE_1024,
+                    'Registered length mismatch',
                 );
                 return false; // Key already exists
             }
 
             // Key not found, proceed with registration
             self.pk_metadata.write(key_hash, pk_len);
+            // XXX: Anyone could attain the public key and register themselves as the owner
             self.pk_owners.write(key_hash, caller);
 
             let mut i: u32 = 0;
@@ -107,11 +112,9 @@ pub mod FalconPublicKeyRegistry {
                 .emit(
                     Event::PublicKeyRegistered(
                         PublicKeyRegisteredEventData {
-                            key_hash,
-                            pk_coefficient_count: pk_len,
-                            registrant: caller,
-                        }
-                    )
+                            key_hash, pk_coefficient_count: pk_len, registrant: caller,
+                        },
+                    ),
                 );
 
             true // Registration successful
@@ -127,7 +130,10 @@ pub mod FalconPublicKeyRegistry {
             }
 
             // If we reach here, the key was found.
-            assert(stored_length == PK_SIZE_512 || stored_length == PK_SIZE_1024, 'Stored PK length mismatch');
+            assert(
+                stored_length == PK_SIZE_512 || stored_length == PK_SIZE_1024,
+                'Stored PK length mismatch',
+            );
 
             let mut coefficients_array = ArrayTrait::new();
             let mut i: u32 = 0;
@@ -148,5 +154,6 @@ pub mod FalconPublicKeyRegistry {
         fn get_registry_owner(self: @ContractState) -> ContractAddress {
             self.owner.read()
         }
+        // TODO: get_registry_owner_keyhash if one exists
     }
 }

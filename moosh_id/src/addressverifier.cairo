@@ -29,15 +29,13 @@ pub mod FalconSignatureVerifier {
     use core::option::OptionTrait;
     use core::traits::{Into, TryInto};
     use falcon::falcon::{FalconVerificationError, verify_uncompressed};
-    use starknet::{ContractAddress};
-    use starknet::syscalls::emit_event_syscall;
-    use starknet::SyscallResultTrait;
 
     // --- Dependency Imports ---
     use moosh_id::keyregistry::FalconPublicKeyRegistry::{
-        IFalconPublicKeyRegistryDispatcher,
-        IFalconPublicKeyRegistryDispatcherTrait,
+        IFalconPublicKeyRegistryDispatcher, IFalconPublicKeyRegistryDispatcherTrait,
     };
+    use starknet::syscalls::emit_event_syscall;
+    use starknet::{ContractAddress, SyscallResultTrait};
 
     // --- Constants ---
     const PK_SIZE_512: u32 = 512;
@@ -86,15 +84,18 @@ pub mod FalconSignatureVerifier {
     #[generate_trait]
     impl InternalImpl of InternalTrait {
         fn emit_success(ref self: ContractState, key_hash: felt252, msg_hash_part: felt252) {
-            self.emit(Event::VerificationSuccess(
-                VerificationSuccess { key_hash, msg_hash_part }
-            ));
+            self.emit(Event::VerificationSuccess(VerificationSuccess { key_hash, msg_hash_part }));
         }
 
-        fn emit_failure(ref self: ContractState, key_hash: felt252, msg_hash_part: felt252, reason: felt252) {
-            self.emit(Event::VerificationFailed(
-                VerificationFailed { key_hash, msg_hash_part, reason }
-            ));
+        fn emit_failure(
+            ref self: ContractState, key_hash: felt252, msg_hash_part: felt252, reason: felt252,
+        ) {
+            self
+                .emit(
+                    Event::VerificationFailed(
+                        VerificationFailed { key_hash, msg_hash_part, reason },
+                    ),
+                );
         }
 
         fn get_msg_hash_part(msg_point_span: Span<u16>) -> felt252 {
@@ -121,7 +122,7 @@ pub mod FalconSignatureVerifier {
 
             let pk_coeffs_array = key_registry_dispatcher.get_public_key(key_hash);
             let n_val: u32 = pk_coeffs_array.len().try_into().unwrap();
-            
+
             // Validate key size
             assert(n_val == PK_SIZE_512 || n_val == PK_SIZE_1024, 'Invalid PK size');
             assert(s1_coeffs_span.len() == pk_coeffs_array.len(), 's1 length mismatch');
@@ -130,7 +131,7 @@ pub mod FalconSignatureVerifier {
             let msg_hash_part = InternalImpl::get_msg_hash_part(msg_point_span);
 
             match verify_uncompressed(
-                s1_coeffs_span, pk_coeffs_array.span(), msg_point_span, n_val
+                s1_coeffs_span, pk_coeffs_array.span(), msg_point_span, n_val,
             ) {
                 Result::Ok(()) => {
                     let mut keys = array![key_hash];
@@ -154,21 +155,26 @@ pub mod FalconSignatureVerifier {
     #[starknet::interface]
     trait IFalconSignatureVerifierEvents<TContractState> {
         fn emit_success(ref self: TContractState, key_hash: felt252, msg_hash_part: felt252);
-        fn emit_failure(ref self: TContractState, key_hash: felt252, msg_hash_part: felt252, reason: felt252);
+        fn emit_failure(
+            ref self: TContractState, key_hash: felt252, msg_hash_part: felt252, reason: felt252,
+        );
     }
 
     #[abi(embed_v0)]
     impl FalconSignatureVerifierEventsImpl of IFalconSignatureVerifierEvents<ContractState> {
         fn emit_success(ref self: ContractState, key_hash: felt252, msg_hash_part: felt252) {
-            self.emit(Event::VerificationSuccess(
-                VerificationSuccess { key_hash, msg_hash_part }
-            ));
+            self.emit(Event::VerificationSuccess(VerificationSuccess { key_hash, msg_hash_part }));
         }
 
-        fn emit_failure(ref self: ContractState, key_hash: felt252, msg_hash_part: felt252, reason: felt252) {
-            self.emit(Event::VerificationFailed(
-                VerificationFailed { key_hash, msg_hash_part, reason }
-            ));
+        fn emit_failure(
+            ref self: ContractState, key_hash: felt252, msg_hash_part: felt252, reason: felt252,
+        ) {
+            self
+                .emit(
+                    Event::VerificationFailed(
+                        VerificationFailed { key_hash, msg_hash_part, reason },
+                    ),
+                );
         }
     }
 }

@@ -8,9 +8,6 @@ VENV_PYTHON = $(VENV_DIR)/bin/python
 VENV_PIP = $(VENV_DIR)/bin/pip
 N = 512  # Default polynomial degree
 
-# Python dependencies
-PYTHON_DEPS = numpy scipy matplotlib pycryptodome
-
 # Directories
 TARGET_DIR = target
 KEY_DIR = $(TARGET_DIR)/keys
@@ -27,10 +24,11 @@ venv:
 
 # Install Python dependencies
 install-deps: venv
-	$(VENV_PIP) install $(PYTHON_DEPS)
+	$(VENV_PIP) install --upgrade setuptools wheel
+	$(VENV_PIP) install -r requirements.txt
 
 # Setup dependencies
-setup: install-deps
+build: install-deps
 	$(VENV_PIP) install -e $(FALCON_DIR)
 	cd moosh_id && scarb build
 
@@ -63,3 +61,12 @@ clean:
 	rm -rf $(TARGET_DIR)
 	rm -rf $(VENV_DIR)
 	cd moosh_id && scarb clean
+
+python-shell:
+	nix-shell -p python311
+
+app:
+	$(VENV_PYTHON) scripts/app.py
+
+# app:
+# 	nix-shell -p python311 --run 'make _app_internal'
