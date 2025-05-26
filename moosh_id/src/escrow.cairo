@@ -12,7 +12,13 @@ pub mod Escrow {
     use starknet::event::EventEmitter;
 
     // Import storage traits
-    use starknet::storage::{StoragePointerReadAccess, StoragePointerWriteAccess};
+    use starknet::storage::{
+        StorageMapReadAccess,
+        StorageMapWriteAccess,
+        StoragePointerReadAccess,
+        StoragePointerWriteAccess,
+        Map
+    };
     
     // Import OpenZeppelin ERC20 interface
     use openzeppelin::token::erc20::interface::{IERC20Dispatcher, IERC20DispatcherTrait};
@@ -22,6 +28,14 @@ pub mod Escrow {
         IFalconSignatureVerifierDispatcher,
         IFalconSignatureVerifierDispatcherTrait,
     };
+
+    // Import key registry interface
+    use moosh_id::keyregistry::FalconPublicKeyRegistry::{
+        IFalconPublicKeyRegistryDispatcher,
+        IFalconPublicKeyRegistryDispatcherTrait,
+    };
+
+    const MSG_POINTS_TAG: felt252 = 'msg_points';
 
     #[storage]
     struct Storage {
@@ -42,8 +56,15 @@ pub mod Escrow {
         // Verifier contract
         verifier: ContractAddress,
 
+        // Key registry contract
+        key_registry: ContractAddress,
+
         // STRK token contract
         strk_token: ContractAddress,
+
+        // Message point for signature verification
+        msg_point_len: u32,
+        msg_points: Map::<u32, u16>
     }
 
     #[event]
@@ -106,19 +127,22 @@ pub mod Escrow {
         total_amount: u128,
         service_period_blocks: u64,
         verifier: ContractAddress,
+        key_registry: ContractAddress,
         strk_token: ContractAddress,
         client_address: ContractAddress,
-        provider_address: ContractAddress
+        provider_address: ContractAddress,
     ) {
         // Set the escrow parameters
         assert(provider_key_hash != 0, 'Provider addr must be non-zero');
         assert(!client_address.is_zero(), 'Client addr must be non-zero');
         assert(!provider_address.is_zero(), 'Provider addr must be non-zero');
+        assert(!key_registry.is_zero(), 'Key registry must be non-zero');
         
         self.provider_key_hash.write(provider_key_hash);
         self.total_amount.write(total_amount);
         self.service_period_blocks.write(service_period_blocks);
         self.verifier.write(verifier);
+        self.key_registry.write(key_registry);
         self.strk_token.write(strk_token);
         
         // Set the client and provider addresses from parameters
@@ -146,9 +170,10 @@ pub mod Escrow {
     pub trait IEscrow<TContractState> {
         fn get_escrow_details(self: @TContractState) -> EscrowDetails;
         fn deposit(ref self: TContractState) -> bool;
-        fn claim(ref self: TContractState, s1_coeffs: Span<u16>, msg_point: Span<u16>) -> bool;
+        fn claim(ref self: TContractState, s1_coeffs: Span<u16>) -> bool;
         fn dispute(ref self: TContractState) -> bool;
         fn get_client_allowance(self: @TContractState) -> u256;
+        fn set_message_points(ref self: TContractState, msg_point_span: Span<u16>) -> bool;
     }
 
     #[generate_trait]
@@ -229,6 +254,23 @@ pub mod Escrow {
                 3 // Completed
             }
         }
+
+        fn get_msg_point_span(self: @ContractState) -> Array<u16> {
+            let msg_point_len = self.msg_point_len.read();
+            let mut msg_point_array = ArrayTrait::new();
+            
+            let mut i: u32 = 0;
+            loop {
+                if i >= msg_point_len {
+                    break;
+                }
+                let point = self.msg_points.read(i);
+                msg_point_array.append(point);
+                i += 1;
+            };
+            
+            msg_point_array
+        }
     }
 
     #[abi(embed_v0)]
@@ -255,6 +297,9 @@ pub mod Escrow {
             // Check if already deposited
             assert(!self.is_deposited.read(), 'Already deposited');
             assert(!self.is_completed.read(), 'Already completed');
+            
+            // Check if message points have been set
+            assert(self.msg_point_len.read() > 0, 'Message points not set');
             
             // Get the deposit amount
             let total_amount = self.total_amount.read();
@@ -316,8 +361,7 @@ pub mod Escrow {
 
         fn claim(
             ref self: ContractState,
-            s1_coeffs: Span<u16>,
-            msg_point: Span<u16>
+            s1_coeffs: Span<u16>
         ) -> bool {
             // Check if deposit has been made
             assert(self.is_deposited.read(), 'Not deposited');
@@ -336,19 +380,21 @@ pub mod Escrow {
                 contract_address: self.verifier.read() 
             };
             
-            // Could try a pre-committed msg_point with signatures from both keys to 'activate' the agreement if the upstream lib became less 'steps' that it could be run twice
-            // TODO: Try ^ with 512 keys in case they are less steps to verify?
+            // Get stored message point
+            let msg_point_array = InternalFunctions::get_msg_point_span(@self);
+            
             // Verify the signature
             let is_valid = verifier.verify_signature_for_key_hash(
                 key_hash,
                 s1_coeffs,
-                msg_point // Should be pre-determined?
+                msg_point_array.span()
             );
             assert(is_valid, 'Invalid signature');
             
-            // Set provider address and mark as claimed
+            
+            // Verify caller is the provider
             let caller = get_caller_address();
-            self.provider.write(caller);
+            
             self.is_claimed.write(true);
             self.is_completed.write(true);
             
@@ -391,6 +437,13 @@ pub mod Escrow {
             let start_block = self.service_start_block.read();
             let total_period = self.service_period_blocks.read();
             
+            // Get the provider's address from key registry
+            let key_registry = IFalconPublicKeyRegistryDispatcher {
+                contract_address: self.key_registry.read()
+            };
+            let key_hash = self.provider_key_hash.read();
+            let provider = key_registry.get_key_owner(key_hash);
+            
             // If not started or pending, return all funds to client
             if status <= 1 {
                 let client = self.client.read();
@@ -408,7 +461,7 @@ pub mod Escrow {
                 self.emit(Event::EscrowDisputed(
                     EscrowDisputed {
                         client,
-                        provider_key_hash: self.provider_key_hash.read(),
+                        provider_key_hash: key_hash,
                         blocks_served: 0,
                         provider_amount: 0,
                         client_refund: total_amount
@@ -436,9 +489,8 @@ pub mod Escrow {
             );
             let client_refund = total_amount - provider_amount;
             
-            // Get addresses and create token dispatcher
+            // Get client address and create token dispatcher
             let client = self.client.read();
-            let provider = self.provider.read();
             let strk = IERC20Dispatcher { contract_address: self.strk_token.read() };
             
             // Validate total balance
@@ -465,7 +517,7 @@ pub mod Escrow {
             self.emit(Event::EscrowDisputed(
                 EscrowDisputed {
                     client,
-                    provider_key_hash: self.provider_key_hash.read(),
+                    provider_key_hash: key_hash,
                     blocks_served,
                     provider_amount,
                     client_refund
@@ -488,6 +540,33 @@ pub mod Escrow {
             
             // Return the allowance
             strk.allowance(client, this_contract)
+        }
+
+        fn set_message_points(ref self: ContractState, msg_point_span: Span<u16>) -> bool {
+            // Only client can set message points
+            InternalFunctions::assert_only_client(@self);
+            
+            // Ensure message points haven't been set before
+            assert(self.msg_point_len.read() == 0, 'Message already set');
+            
+            // Validate message point span
+            assert(msg_point_span.len() > 0, 'Message point must not be empty');
+            
+            // Store the message point span
+            let msg_point_len: u32 = msg_point_span.len().try_into().unwrap();
+            self.msg_point_len.write(msg_point_len);
+            
+            let mut i: u32 = 0;
+            loop {
+                if i >= msg_point_len {
+                    break;
+                }
+                let point = *msg_point_span.at(i.try_into().unwrap());
+                self.msg_points.write(i, point);
+                i += 1;
+            };
+            
+            true
         }
     }
 } 
