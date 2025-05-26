@@ -1,7 +1,3 @@
-// SPDX-FileCopyrightText: 2025 Yerbacorp Pty Ltd
-//
-// SPDX-License-Identifier: MIT
-
 #[starknet::contract]
 pub mod FalconPublicKeyRegistry {
     use core::array::{ArrayTrait, SpanTrait};

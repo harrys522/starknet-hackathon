@@ -1,8 +1,3 @@
-// SPDX-FileCopyrightText: 2025 Yerbacorp Pty Ltd
-//
-// SPDX-License-Identifier: MIT
-
-// Define the Events module at the top level of your lib.cairo
 mod Events {
     // Event data structs are now public within this module
     #[derive(Drop, starknet::Event)]
