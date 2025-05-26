@@ -1,2 +1,2 @@
 starknet-py==0.25.0
-gradio
+gradio==4.44.1

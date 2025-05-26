@@ -673,7 +673,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:  # Added a soft theme for better
             user_account_address_state,
         ],
         outputs=[status_text, progress_text, dispute_btn, amount_refund],
-        # every=5,  # Update every 5 seconds
+        every=5,  # Update every 5 seconds
     )
 
 
