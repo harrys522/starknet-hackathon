@@ -4,6 +4,15 @@
 
 Make an on-chain verifier for ZKPs which prove a signature for a shortened (hashed) falcon address.
 
+For example:
+```
+register_address(
+    pk: Span<u16>, n: u32,
+) -> Result<(hashAddress, HashError)> {
+
+}
+```
+
 ## Contract 1: Register Identity
 
 Arguments:
@@ -23,15 +32,17 @@ If each slot is $0.20, it would cost $5.60, but it only needs to be run once by 
 
 Arguments:
 
+* `key_hash` - The id registered in contract 1
 * `s1` - Uncompressed signature
-* `address` - The id registered in contract 1
-* `msg_point` - pre-computed SHAKE(message | salt)
 * `n` - the degree of the polynomials
+* `msg_point` - pre-computed SHAKE(message | salt) is also required, but it is specified as a fixed value in the escrow contract
 
 Takes an address and message point to resolve a public key from contract 1 and run verify_uncompressed()
 
 1. Generate a STARK that proves an uncompressed signature was verified for a public key and (msg | salt) content.
 2. Verify_compressed(addressTx STARK, sig verify uncompressed STARK) -> ZKP of message signature for shortened address
+
+### Upstream S2morrow verify falcon signature
 
 ```cairo
 /// Verify a Falcon signature
@@ -58,11 +69,4 @@ pub fn verify_uncompressed<const N: u32>(
 
     Result::Ok(())
 }
-
-register_address(
-    pk: Span<u16>, n: u32,
-) -> Result<(hashAddress, HashError)> {
-
-}
 ```
-
