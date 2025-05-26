@@ -1,256 +1,140 @@
 # scripts/cairo_interactions.py
-import json
 import random
-from starknet_py.contract import Contract
+import traceback
 from starknet_py.net.full_node_client import FullNodeClient
 from starknet_py.net.account.account import Account
-from starknet_py.net.models import StarknetChainId
+from starknet_py.net.models import StarknetChainId, InvokeV3
 from starknet_py.net.signer.stark_curve_signer import KeyPair
 from starknet_py.constants import (
     DEFAULT_DEPLOYER_ADDRESS,
-)  # Standard UDC address
+)
 from starknet_py.hash.selector import get_selector_from_name
 from starknet_py.hash.address import compute_address
-from starknet_py.net.client_models import Call
+from starknet_py.net.client_models import Call, ResourceBounds
 
-# --- Configuration (Replace with your actual values or load from env/config) ---
-NODE_URL = "YOUR_STARKNET_NODE_URL"  # e.g., Infura, Alchemy, or local node
-CONTRACT_ADDRESS = "YOUR_DEPLOYED_CONTRACT_ADDRESS"
-ACCOUNT_ADDRESS = "YOUR_STARKNET_ACCOUNT_ADDRESS"
-PRIVATE_KEY = "YOUR_STARKNET_ACCOUNT_PRIVATE_KEY"
-CHAIN_ID = (
-    StarknetChainId.SEPOLIA
-)  # Or StarknetChainId.MAINNET, StarknetChainId.SEPOLIA_TESTNET etc.
-
-FALCON_KEY_REGISTRY_CLASS_HASH_HEX = (
-    0x022A351AB5F1AC13352A3792BE246D8C6513D9029F3674608AC4CD7944AA702E
+# --- Configuration ---
+# Class hashes are defined as strings with "0x" prefix
+FALCON_KEY_REGISTRY_CONTRACT_HASH = (  # Renamed in app.py to FALCON_KEY_REGISTRY_CLASS_HASH_HEX
+    "0x022A351AB5F1AC13352A3792BE246D8C6513D9029F3674608AC4CD7944AA702E"
 )
-# Path to your ABI file
-ABI_PATH = "abis/my_cairo_contract.abi.json"  # Adjust path as needed
+FALCON_ADDRESS_BASED_VERIFIER_CONTRACT_HASH = (
+    "0x0396507525F71D979D306DF5B72C568DFCCA173158086D73806E496B054670A3"
+)
+ESCROW_CONTRACT_HASH = (
+    "0x03C435E79CB8246F1351C5CFE92DD7D1FF6D2A684395E5BC7D5F0792ED46B147"
+)
+
+# IMPORTANT: Configure your Node URL properly.
+# Using a node that supports RPC v0.8.1+ is recommended for newer starknet-py versions.
+NODE_URL = (
+    "https://starknet-sepolia.public.blastapi.io/"  # Or your preferred Sepolia node
+)
+CHAIN_ID = StarknetChainId.SEPOLIA
 
 
-def load_abi():
-    """Loads the contract ABI from the JSON file."""
-    try:
-        with open(ABI_PATH, "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        print(f"Error: ABI file not found at {ABI_PATH}")
+def _hex_str_to_int(hex_str: str) -> int:
+    """Helper to convert hex string (with or without 0x) to int."""
+    if not isinstance(hex_str, str):
+        raise ValueError(f"Input must be a string, got {type(hex_str)}")
+    return int(hex_str, 16)
+
+
+async def get_deployer_account(
+    private_key_hex: str, account_address_hex: str
+) -> Account | None:
+    """
+    Initializes and returns an Account instance for deploying contracts,
+    using the provided private key and account address.
+    """
+    if not private_key_hex:
+        print("Error: Deployer private key not provided.")
         return None
-    except json.JSONDecodeError:
-        print(f"Error: Could not decode ABI JSON from {ABI_PATH}")
+    if not account_address_hex:
+        print("Error: Deployer account address not provided.")
         return None
-
-
-async def get_contract():
-    """Initializes and returns a Contract instance."""
-    abi = load_abi()
-    if not abi:
-        return None
-
-    # For read-only calls, you might only need a client
-    client = FullNodeClient(node_url=NODE_URL)
-
-    # For transactions (write calls), you need an account
-    # key_pair = KeyPair.from_private_key(int(PRIVATE_KEY, 16))
-    # account = Account(
-    #     client=client,
-    #     address=int(ACCOUNT_ADDRESS, 16),
-    #     key_pair=key_pair,
-    #     chain=CHAIN_ID,
-    # )
-
-    contract = Contract(
-        address=int(CONTRACT_ADDRESS, 16),
-        abi=abi,
-        provider=client,  # or provider=account if making transactions
-    )
-    return contract
-
-
-async def call_my_contract_function(input_value: str) -> str:
-    """
-    Example function to call a read-only function on your Cairo contract.
-    Adjust function name, inputs, and processing based on your contract.
-    """
-    contract = await get_contract()
-    if not contract:
-        return "Error: Could not initialize contract."
-
-    try:
-        # Assuming your contract has a view function like `get_value(some_input: felt252) -> felt252`
-        # The exact syntax for calling functions depends on starknet-py version and your contract
-        # For felt252, you might need to convert Python strings/numbers appropriately.
-        # If input_value is a number string: int(input_value)
-        # If it's a short string, it might need encoding.
-
-        # Example: if your contract's function is `get_processed_value(user_input: felt252)`
-        # and `input_value` is expected as a number (felt)
-        prepared_input = int(input_value)
-
-        invocation = await contract.functions["your_contract_view_function_name"].call(
-            prepared_input
-        )
-
-        # The result might be a struct or a simple type. Adjust accordingly.
-        # Example: if it returns a single felt value:
-        return f"Contract returned: {invocation[0]}"  # Accessing the first element of the tuple result
-
-    except Exception as e:
-        return f"Error calling contract: {e}"
-
-
-async def submit_transaction_to_contract(value_to_set: int) -> str:
-    """
-    Example function to submit a transaction (write call) to your Cairo contract.
-    """
-    abi = load_abi()
-    if not abi:
-        return "Error: ABI not loaded."
-
-    client = FullNodeClient(node_url=NODE_URL)
-    key_pair = KeyPair.from_private_key(int(PRIVATE_KEY, 16))
-    account = Account(
-        client=client,
-        address=int(ACCOUNT_ADDRESS, 16),
-        key_pair=key_pair,
-        chain=CHAIN_ID,
-    )
-
-    contract = Contract(
-        address=int(CONTRACT_ADDRESS, 16),
-        abi=abi,
-        provider=account,  # Use account as provider for transactions
-    )
-
-    try:
-        # Assuming your contract has an external function like `set_value(new_value: u256)`
-        # Ensure `value_to_set` is in the correct format (e.g., for u256, it might be a dict {'low': ..., 'high': ...} or just int)
-        invocation = await contract.functions[
-            "your_contract_write_function_name"
-        ].invoke_v1(
-            value_to_set,  # Pass the argument(s) for your contract function
-            max_fee=int(1e16),  # Set an appropriate max fee
-        )
-        await (
-            invocation.wait_for_acceptance()
-        )  # Wait for the transaction to be accepted
-        return f"Transaction submitted! Hash: {hex(invocation.hash)}"
-    except Exception as e:
-        return f"Error submitting transaction: {e}"
-
-
-# You can add more functions here that call other scripts or perform other logic
-# Function to get an Account instance (can be reused or adapted)
-async def get_deployer_account():
-    """Initializes and returns an Account instance for deploying contracts."""
-    if any(
-        val
-        in [
-            None,
-            "YOUR_STARKNET_ACCOUNT_ADDRESS_HEX_OR_INT",
-            "YOUR_STARKNET_ACCOUNT_PRIVATE_KEY_HEX",
-        ]
-        for val in [ACCOUNT_ADDRESS, PRIVATE_KEY]
-    ):
-        print("Error: Deployer account address or private key is not configured.")
+    if not NODE_URL or NODE_URL == "YOUR_STARKNET_NODE_URL":  # Placeholder check
+        print("CRITICAL Error: NODE_URL is not configured or is a placeholder.")
         return None
 
     client = FullNodeClient(node_url=NODE_URL)
     try:
-        account_address_int = (
-            int(ACCOUNT_ADDRESS, 16)
-            if isinstance(ACCOUNT_ADDRESS, str) and ACCOUNT_ADDRESS.startswith("0x")
-            else int(ACCOUNT_ADDRESS)
-        )
-        private_key_int = (
-            int(PRIVATE_KEY, 16)
-            if isinstance(PRIVATE_KEY, str) and PRIVATE_KEY.startswith("0x")
-            else int(PRIVATE_KEY)
-        )
+        # Robust conversion for hex strings (with or without "0x")
+        account_address_int = _hex_str_to_int(account_address_hex)
+        private_key_int = _hex_str_to_int(private_key_hex)
+
+        key_pair = KeyPair.from_private_key(private_key_int)
 
         account = Account(
             client=client,
             address=account_address_int,
-            key_pair=KeyPair.from_private_key(private_key_int),
+            key_pair=key_pair,
             chain=CHAIN_ID,
         )
+        print(f"Deployer account initialized for address: {hex(account.address)}")
         return account
+    except ValueError as e:
+        print(f"Error: Invalid private key or account address format: {e}")
+        return None
     except Exception as e:
         print(f"Error creating deployer account object: {e}")
+        traceback.print_exc()
         return None
 
 
-# New function to deploy a contract instance using its class hash via UDC
 async def deploy_new_contract_instance(
-    class_hash_hex: str, constructor_args: list = None
-):
+    class_hash_hex: str,
+    deployer_private_key_hex: str,
+    deployer_account_address_hex: str,
+    constructor_args: list | None = None,
+) -> tuple[str | None, str | None]:
     """
     Deploys a new contract instance using its class hash via the Universal Deployer Contract (UDC).
-
-    :param class_hash_hex: The class hash of the contract to deploy (hex string).
-    :param constructor_args: A list of arguments for the contract's constructor.
-                             Each argument should be in the format expected by StarkNet (usually integers).
-                             Example: [provider_address, initial_value]
-    :return: Tuple (deployed_contract_address_hex, transaction_hash_hex) or (None, None) on error.
+    Returns (deployed_contract_address_hex, transaction_hash_hex) or (error_message_str, None).
     """
-    deployer_account = await get_deployer_account()
+    deployer_account = await get_deployer_account(
+        deployer_private_key_hex, deployer_account_address_hex
+    )
     if not deployer_account:
         return "Error: Deployer account not initialized.", None
 
-    if (
-        class_hash_hex == "0xYOUR_ACTUAL_FALCON_KEY_REGISTRY_CLASS_HASH"
-        or not class_hash_hex.startswith("0x")
-    ):
-        return (
-            f"Error: Invalid or placeholder class hash provided: {class_hash_hex}",
-            None,
-        )
+    try:
+        class_hash_int = _hex_str_to_int(class_hash_hex)
+    except ValueError:
+        return f"Error: Invalid class_hash_hex format: {class_hash_hex}", None
 
     if constructor_args is None:
         constructor_args = []
 
     try:
-        class_hash_int = int(class_hash_hex, 16)
-
-        # For constructor arguments, ensure they are integers if representing felts/u_types
-        # More complex types (structs, arrays) require specific formatting.
-        # For simplicity, assuming basic integer arguments here.
         prepared_constructor_calldata = []
         for arg in constructor_args:
-            if isinstance(arg, str) and arg.startswith("0x"):
-                prepared_constructor_calldata.append(int(arg, 16))
-            elif isinstance(arg, str) and arg.isdigit():
-                prepared_constructor_calldata.append(int(arg))
+            if isinstance(arg, str):
+                prepared_constructor_calldata.append(_hex_str_to_int(arg))
             elif isinstance(arg, int):
                 prepared_constructor_calldata.append(arg)
             else:
-                # Add more sophisticated parsing if needed, e.g. for short strings
-                raise ValueError(f"Unsupported constructor argument type: {arg}")
+                raise ValueError(f"Unsupported constructor argument type: {type(arg)}")
 
-        # Salt for deployment uniqueness. Random salt ensures a new address each time.
         salt = random.randint(0, 2**128 - 1)
+        unique_flag = (
+            0  # Common for UDC deployments to make address dependent on salt & calldata
+        )
 
-        # `unique=0` means address computation doesn't depend on deployer address,
-        # only on class_hash, salt, and constructor_calldata.
-        # `unique=1` means it also depends on deployer address (caller of UDC).
-        # For distinct new instances, random salt with unique=0 is common.
-        unique_flag = 0
-
-        # Pre-compute the expected contract address (optional but good for verification)
+        # Use compute_contract_address for UDC deployments for semantic clarity
         expected_address = compute_address(
             salt=salt,
             class_hash=class_hash_int,
             constructor_calldata=prepared_constructor_calldata,
-            deployer_address=DEFAULT_DEPLOYER_ADDRESS,  # Address of the UDC itself
+            deployer_address=int(
+                DEFAULT_DEPLOYER_ADDRESS, 16
+            ),  # This is the UDC's address
         )
+
         print(f"Attempting to deploy contract with class hash: {hex(class_hash_int)}")
         print(f"Salt: {salt}")
         print(f"Constructor Calldata: {prepared_constructor_calldata}")
         print(f"Expected Contract Address: {hex(expected_address)}")
 
-        # Prepare the call to UDC's 'deployContract' function
-        # Calldata for deployContract: [classHash, salt, unique, constructor_calldata_len, ...constructor_calldata]
         udc_calldata = [
             class_hash_int,
             salt,
@@ -260,18 +144,117 @@ async def deploy_new_contract_instance(
         ]
 
         udc_deploy_call = Call(
-            to_addr=DEFAULT_DEPLOYER_ADDRESS,
+            to_addr=int(DEFAULT_DEPLOYER_ADDRESS, 16),
             selector=get_selector_from_name("deployContract"),
             calldata=udc_calldata,
         )
 
-        print("Signing and sending deployment transaction via UDC...")
-        # max_fee should be estimated or set appropriately for the network
-        resp = await deployer_account.sign_invoke_transaction(
+        # print("Estimating fee for V3 transaction...")
+        # try:
+        #     # Pass the Call object directly as the first positional argument
+        #     transaction = InvokeV3(
+        #         calldata=udc_deploy_call,
+        #         resource_bounds=ResourceBoundsMapping.init_with_zeros(),
+        #         signature=[],
+        #         nonce=nonce,
+        #         sender_address=self.address,
+        #         version=3,
+        #     )
+        #     estimated_fee = await deployer_account.estimate_fee(transaction)
+        #     print(f"Raw estimated fee object: {estimated_fee}")
+
+        #     # Try to use resource_bounds directly from the estimate if available (common in newer starknet-py)
+        #     if hasattr(estimated_fee, "resource_bounds") and isinstance(
+        #         estimated_fee.resource_bounds, dict
+        #     ):
+        #         resource_bounds_dict = estimated_fee.resource_bounds
+        #         # Apply a buffer to max_amount for safety
+        #         if "l1_gas" in resource_bounds_dict and hasattr(
+        #             resource_bounds_dict["l1_gas"], "max_amount"
+        #         ):
+        #             resource_bounds_dict["l1_gas"].max_amount = int(
+        #                 resource_bounds_dict["l1_gas"].max_amount * 1.5
+        #             )
+        #         if "l2_gas" in resource_bounds_dict and hasattr(
+        #             resource_bounds_dict["l2_gas"], "max_amount"
+        #         ):
+        #             resource_bounds_dict["l2_gas"].max_amount = int(
+        #                 resource_bounds_dict["l2_gas"].max_amount * 1.5
+        #             )
+        #         print(
+        #             f"Using resource_bounds from estimate_fee: {resource_bounds_dict}"
+        #         )
+        #     elif hasattr(estimated_fee, "l1_gas_usage") and hasattr(
+        #         estimated_fee, "l1_gas_price"
+        #     ):  # Example for older structure
+        #         # This part is more speculative as EstimatedFee structure can vary.
+        #         # You might need to adjust based on the actual attributes of `estimated_fee`.
+        #         print(
+        #             "Constructing resource_bounds from detailed fee components (experimental)."
+        #         )
+        #         l1_max_amount = int(estimated_fee.l1_gas_usage * 1.5)
+        #         l1_max_price = int(
+        #             estimated_fee.l1_gas_price * 1.5
+        #         )  # Or use current L1 gas price
+        #         l2_max_amount = int(estimated_fee.gas_usage * 1.5)  # L2 gas (steps)
+        #         l2_max_price = int(
+        #             estimated_fee.gas_price * 1.5
+        #         )  # L2 gas price (FRI/step)
+        #         resource_bounds_dict = {
+        #             "l1_gas": ResourceBounds(
+        #                 max_amount=l1_max_amount, max_price_per_unit=l1_max_price
+        #             ),
+        #             "l2_gas": ResourceBounds(
+        #                 max_amount=l2_max_amount, max_price_per_unit=l2_max_price
+        #             ),
+        #         }
+        #         print(f"Manually constructed resource_bounds: {resource_bounds_dict}")
+        #     else:
+        #         # Fallback if structure is unknown or very minimal (e.g., only overall_fee)
+        #         # This requires making broad assumptions and is less reliable.
+        #         print(
+        #             "Warning: Could not determine detailed resource bounds from estimate_fee. Using fallback."
+        #         )
+        #         # This will likely fail if node expects explicit l1_gas and l2_gas bounds.
+        #         # For V3, you typically need to provide both L1 and L2 gas bounds.
+        #         # Using overall_fee directly is more like V1's max_fee.
+        #         # A more robust fallback would query current L1 gas price.
+        #         # Placeholder to illustrate structure, actual values need to be sensible.
+        #         example_l1_max_amount = 30000  # Placeholder value for L1 gas units
+        #         example_l1_max_price = int(10 * 10**9)  # Placeholder: 10 Gwei in Wei
+        #         example_l2_max_amount = (
+        #             int(estimated_fee.gas_usage * 1.5)
+        #             if hasattr(estimated_fee, "gas_usage")
+        #             else 500000
+        #         )
+        #         example_l2_max_price = (
+        #             int(estimated_fee.gas_price * 1.5)
+        #             if hasattr(estimated_fee, "gas_price")
+        #             else int(10 * 10**9)
+        #         )
+
+        #         resource_bounds_dict = {
+        #             "l1_gas": ResourceBounds(
+        #                 max_amount=example_l1_max_amount,
+        #                 max_price_per_unit=example_l1_max_price,
+        #             ),
+        #             "l2_gas": ResourceBounds(
+        #                 max_amount=example_l2_max_amount,
+        #                 max_price_per_unit=example_l2_max_price,
+        #             ),
+        #         }
+        #         print(f"Fallback resource_bounds: {resource_bounds_dict}")
+
+        # except Exception as fee_error:
+        #     print(f"Error during fee estimation: {fee_error}")
+        #     traceback.print_exc()
+        #     return f"Deployment Error: Fee estimation failed - {fee_error}", None
+
+        print("Signing and sending V3 deployment transaction via UDC...")
+        resp = await deployer_account.sign_invoke_v3(
             calls=udc_deploy_call,
-            max_fee=int(
-                3e16
-            ),  # Example fee, adjust based on network conditions and transaction complexity
+            # resource_bounds=resource_bounds_dict,
+            auto_estimate=True,  # DOESNT WORK! unexpected field l1_data_gas
         )
 
         print(f"Deployment transaction sent. Hash: {hex(resp.transaction_hash)}")
@@ -280,45 +263,48 @@ async def deploy_new_contract_instance(
             resp.transaction_hash, wait_for_accept=True
         )
 
-        # The actual deployed address is emitted in the 'ContractDeployed' event by the UDC
-        # It's typically the 4th element (index 3) in the event.data array.
-        deployed_contract_address = None
-        contract_deployed_event_selector = get_selector_from_name("ContractDeployed")
+        # Try to get deployed address from receipt directly first
+        actual_deployed_address = (
+            receipt.contract_address
+            if receipt.contract_address and receipt.contract_address != 0
+            else None
+        )
 
-        for event in receipt.events:
-            # Check if the event is ContractDeployed by comparing keys[0] with its selector
-            if event.keys and event.keys[0] == contract_deployed_event_selector:
-                if len(event.data) >= 4:  # class_hash, salt, deployer, address
-                    # Address is usually at data[3] if keys = [ContractDeployed_selector]
-                    # Or data[0] if keys = [ContractDeployed_selector, deployer, class_hash, salt]
-                    # For standard UDC, address is at data[3] if keys[0] is selector
-                    # and event.from_address is UDC_CONTRACT_ADDRESS
-                    if event.from_address == DEFAULT_DEPLOYER_ADDRESS:
-                        deployed_contract_address = event.data[
-                            3
-                        ]  # Address is the 4th field in data for UDC event
+        if (
+            not actual_deployed_address
+        ):  # Fallback to event parsing if not in receipt directly
+            contract_deployed_event_selector = get_selector_from_name(
+                "ContractDeployed"
+            )
+            for event in receipt.events:
+                if (
+                    event.from_address == DEFAULT_DEPLOYER_ADDRESS
+                    and event.keys
+                    and event.keys[0] == contract_deployed_event_selector
+                ):
+                    # Standard UDC ContractDeployed event data[0] is the deployed contract address
+                    if event.data and len(event.data) > 0:
+                        actual_deployed_address = event.data[0]
                         break
 
-        if deployed_contract_address is not None:
-            deployed_address_hex = hex(deployed_contract_address)
+        if actual_deployed_address:
+            deployed_address_hex = hex(actual_deployed_address)
             print(
                 f"Transaction accepted! Contract deployed at address: {deployed_address_hex}"
             )
-            if deployed_address_hex != hex(expected_address):
+            if deployed_address_hex.lower() != hex(expected_address).lower():
                 print(
-                    f"Warning: Deployed address {deployed_address_hex} differs from pre-computed address {hex(expected_address)}."
+                    f"Warning: Deployed address {deployed_address_hex} differs from pre-computed address {hex(expected_address)}! This can happen due to different address computation versions or parameters."
                 )
             return deployed_address_hex, hex(resp.transaction_hash)
         else:
-            # Fallback to precomputed if event parsing fails, though this is less reliable
+            # If still no address, rely on precomputed but warn heavily.
             print(
-                "Transaction accepted. Could not reliably parse deployed address from events. Using precomputed address."
+                f"Transaction accepted. Using precomputed address: {hex(expected_address)}. (Could not parse address from UDC events or receipt details)"
             )
             return hex(expected_address), hex(resp.transaction_hash)
 
     except Exception as e:
         print(f"Error during contract deployment: {e}")
-        import traceback
-
         traceback.print_exc()
         return f"Deployment Error: {e}", None
