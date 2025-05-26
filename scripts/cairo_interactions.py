@@ -1,5 +1,10 @@
+# scripts/cairo_interactions.py
+import json
+import random
 import json
 import traceback
+from typing import Optional, Tuple, List, Union
+
 from starknet_py.net.full_node_client import FullNodeClient
 from starknet_py.net.account.account import Account
 from starknet_py.net.models import StarknetChainId, InvokeV3
@@ -16,6 +21,14 @@ from starknet_py.common import create_sierra_compiled_contract
 from pathlib import Path
 from utils import FALCON_KEY_REGISTRY_ABI, FALCON_VERIFIER_ABI, FALCON_ESCROW_ABI
 from poseidon_py import poseidon_hash
+from starknet_py.net.client_models import Call, ResourceBounds, ResourceBoundsMapping
+from starknet_py.contract import Contract
+from utils import (
+    FALCON_KEY_REGISTRY_ABI,
+    FALCON_VERIFIER_ABI,
+    FALCON_ESCROW_ABI,
+    MSG_POINT,
+)
 
 # --- Configuration ---
 # Class hashes are defined as strings with "0x" prefix
@@ -26,7 +39,7 @@ FALCON_ADDRESS_BASED_VERIFIER_CONTRACT_HASH = (
     "0x0396507525F71D979D306DF5B72C568DFCCA173158086D73806E496B054670A3"
 )
 ESCROW_CONTRACT_HASH = (
-    "0x03C435E79CB8246F1351C5CFE92DD7D1FF6D2A684395E5BC7D5F0792ED46B147"
+    "0x0028172888cc58dece1ccaaadcd0b8076eb85f0284f95aecd28027042b0f64a9"
 )
 
 # IMPORTANT: Configure your Node URL properly.
@@ -44,9 +57,16 @@ DEFAULT_CASM_PATH = (
 # moosh_id_FalconPublicKeyRegistry.compiled_contract_class.json
 
 
+def _hex_str_to_int(hex_str: str) -> int:
+    """Helper to convert hex string (with or without 0x) to int."""
+    if not isinstance(hex_str, str):
+        raise ValueError(f"Input must be a string, got {type(hex_str)}")
+    return int(hex_str, 16)
+
+
 async def get_deployer_account(
     private_key_hex: str, account_address_hex: str
-) -> Account | None:
+) -> Optional[Account]:
     """
     Initializes and returns an Account instance for deploying contracts,
     using the provided private key and account address.
@@ -93,9 +113,8 @@ async def deploy_new_contract_instance(
     class_hash_hex: str,
     deployer_private_key_hex: str,
     deployer_account_address_hex: str,
-    constructor_args: list | None = None,
-    abi: list = [],
-) -> tuple[str | None, str | None]:
+    constructor_args: Optional[List[Union[str, int]]] = None,
+) -> Tuple[Optional[str], Optional[str]]:
     """
     Deploys a new contract instance using its class hash via the Universal Deployer Contract (UDC).
     Returns (deployed_contract_address_hex, transaction_hash_hex) or (error_message_str, None).
@@ -107,26 +126,175 @@ async def deploy_new_contract_instance(
         print("Deployer account failed:", deployer_account)
         return "Error: Deployer account not initialized.", None
 
-    # Deploy using pre-declared contract_hash
-    resp = await Contract.deploy_contract_v3(
-        account=deployer_account,
-        class_hash=class_hash_hex,
-        constructor_args=constructor_args,
-        l1_resource_bounds=ResourceBounds(
-            max_amount=int(30000), max_price_per_unit=int(25 * 10**14)
-        ),
-        abi=abi,
-    )
-    time.sleep(5)
-    print("Deploy contract attempt complete")
-    tx = await resp.wait_for_acceptance()
-    print("Successfully deployed")
+    try:
+        class_hash_int = _hex_str_to_int(class_hash_hex)
+    except ValueError:
+        return f"Error: Invalid class_hash_hex format: {class_hash_hex}", None
 
-    contract_address = hex(tx.deployed_contract.address)
-    tx_hash_hex = hex(tx.hash)
-    print("output: ", resp, tx)
-    print("Contract deployed successfully:", contract_address)
-    return (contract_address, tx_hash_hex)
+    if constructor_args is None:
+        constructor_args = []
+
+    try:
+        prepared_constructor_calldata = []
+        for arg in constructor_args:
+            if isinstance(arg, str) and arg.startswith("0x"):
+                # Convert hex strings to integers
+                prepared_constructor_calldata.append(_hex_str_to_int(arg))
+            elif isinstance(arg, str) and arg.isdigit():
+                # Convert numeric strings to integers
+                prepared_constructor_calldata.append(int(arg))
+            elif isinstance(arg, (int, float)):
+                # Pass numbers directly
+                prepared_constructor_calldata.append(int(arg))
+            else:
+                raise ValueError(
+                    f"Unsupported constructor argument type or format: {type(arg)} - {arg}"
+                )
+
+        print(f"Deploying contract with class hash: {class_hash_hex}")
+        print(f"Constructor args: {prepared_constructor_calldata}")
+
+        # Select the appropriate ABI based on the class hash
+        if class_hash_hex == FALCON_KEY_REGISTRY_CONTRACT_HASH:
+            abi = FALCON_KEY_REGISTRY_ABI
+        elif class_hash_hex == FALCON_ADDRESS_BASED_VERIFIER_CONTRACT_HASH:
+            abi = FALCON_VERIFIER_ABI
+        elif class_hash_hex == ESCROW_CONTRACT_HASH:
+            abi = FALCON_ESCROW_ABI
+        else:
+            raise ValueError(f"Unknown contract class hash: {class_hash_hex}")
+
+        deploy_result = await Contract.deploy_contract_v3(
+            account=deployer_account,
+            class_hash=class_hash_int,
+            abi=abi,
+            constructor_args=prepared_constructor_calldata,
+            auto_estimate=True,
+        )
+
+        await deploy_result.wait_for_acceptance()
+        contract = deploy_result.deployed_contract
+        contract_address = hex(contract.address)
+
+        # If this is an escrow contract, set the message points
+        if class_hash_hex == ESCROW_CONTRACT_HASH:
+            print("Setting message points for escrow contract...")
+
+            tx_hash, error = await call_msg_points(
+                contract_address, deployer_account, MSG_POINT
+            )
+            tx_hash, error = await Stark_Token_Approve(
+                "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d",
+                contract_address,
+                deployer_account,
+                constructor_args[1],
+            )
+            tx_hash, error = await deposit_stark_token(
+                contract_address, deployer_account
+            )
+            if error:
+                print(f"Warning: Failed to set message points: {error}")
+            else:
+                print(f"Successfully set message points. Transaction hash: {tx_hash}")
+
+        return contract_address, hex(deploy_result.hash)
+
+    except Exception as e:
+        print(f"Error during contract deployment: {e}")
+        traceback.print_exc()
+        return f"Deployment Error: {e}", None
+
+
+async def call_msg_points(
+    contract_address: str, deployer_account, msg_points: List[int]
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Calls the set_message_points function on the escrow contract.
+    Args:
+        contract_address: The hex address of the escrow contract
+        msg_points: List of u16 integers representing the message points
+    Returns:
+        Tuple of (transaction_hash_hex, error_message)
+    """
+    try:
+        contract_address_int = _hex_str_to_int(contract_address)
+
+        # Create contract instance with escrow ABI
+        contract = Contract(
+            address=contract_address_int,
+            abi=FALCON_ESCROW_ABI,
+            provider=deployer_account,
+        )
+
+        # Call set_message_points with the msg_points array
+        invoke_result = await contract.functions["set_message_points"].invoke_v3(
+            msg_points, auto_estimate=True
+        )
+
+        await invoke_result.wait_for_acceptance()
+        print(
+            f"Successfully set message points. Transaction hash: {hex(invoke_result.hash)}"
+        )
+        return hex(invoke_result.hash), None
+
+    except Exception as e:
+        print(f"Error in call_msg_points: {e}")
+        traceback.print_exc()
+        return None, f"Error: {str(e)}"
+
+
+async def Stark_Token_Approve(
+    stark_contract_address: str,
+    escrow_contract_address: str,
+    deployer_account,
+    amount: int,
+):
+    try:
+        stark_contract_address_int = _hex_str_to_int(stark_contract_address)
+        escrow_contract_address_int = _hex_str_to_int(escrow_contract_address)
+
+        stark_contract = await Contract.from_address(
+            provider=deployer_account, address=stark_contract_address_int
+        )
+
+        invoke_result = await stark_contract.functions["approve"].invoke_v3(
+            escrow_contract_address_int, amount, auto_estimate=True
+        )
+
+        await invoke_result.wait_for_acceptance()
+        print(f"Successfully approved. Transaction hash: {hex(invoke_result.hash)}")
+        return hex(invoke_result.hash), None
+    except Exception as e:
+        print(f"Error in Stark_Token_Approve: {e}")
+        traceback.print_exc()
+        return None, f"Error: {str(e)}"
+
+
+async def deposit_stark_token(
+    escrow_contract_address: str,
+    deployer_account,
+):
+    try:
+        escrow_contract_address_int = _hex_str_to_int(escrow_contract_address)
+        # Create contract instance with escrow ABI
+        contract = Contract(
+            address=escrow_contract_address_int,
+            abi=FALCON_ESCROW_ABI,
+            provider=deployer_account,
+        )
+
+        # Call set_message_points with the msg_points array
+        invoke_result = await contract.functions["deposit"].invoke_v3(
+            auto_estimate=True
+        )
+
+        await invoke_result.wait_for_acceptance()
+        print(f"Successfully deposited. Transaction hash: {hex(invoke_result.hash)}")
+        return hex(invoke_result.hash), None
+    except Exception as e:
+        print(f"Error in deposit_stark_token: {e}")
+        traceback.print_exc()
+        return None, f"Error: {str(e)}"
 
 
 async def call_register_public_key(
@@ -280,6 +448,9 @@ async def call_escrow_claim(
         return "Claim transaction accepted.", hex(invocation.hash)
 
     except Exception as e:
+        print(f"Error in deposit_stark_token: {e}")
         print(f"Error calling 'claim' on Escrow contract: {e}")
         traceback.print_exc()
+        return None, f"Error: {str(e)}"
+
         return f"Error during claim: {str(e)}", None
