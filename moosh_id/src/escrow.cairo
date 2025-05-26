@@ -2,7 +2,6 @@
 pub mod Escrow {
     use core::traits::Into;
     use core::traits::TryInto;
-    use core::zeroable;
     use core::num::traits::Zero;
     use core::array::Span;
     use starknet::{
@@ -10,6 +9,7 @@ pub mod Escrow {
         get_contract_address,
         get_caller_address,
     };
+    use starknet::event::EventEmitter;
 
     // Import storage traits
     use starknet::storage::{StoragePointerReadAccess, StoragePointerWriteAccess};
@@ -23,17 +23,11 @@ pub mod Escrow {
         IFalconSignatureVerifierDispatcherTrait,
     };
 
-    // STRK token address
-    use snforge_std::{
-        Token,
-        TokenTrait
-    };
-
     #[storage]
     struct Storage {
         // Core escrow data
         provider_key_hash: felt252,
-        total_amount: u256,
+        total_amount: u128,  // Changed from felt252 to u128
         service_period_blocks: u64,  // Duration of service in blocks
         service_start_block: u64,    // When service starts
         is_completed: bool,
@@ -47,6 +41,9 @@ pub mod Escrow {
 
         // Verifier contract
         verifier: ContractAddress,
+
+        // STRK token contract
+        strk_token: ContractAddress,
     }
 
     #[event]
@@ -62,20 +59,20 @@ pub mod Escrow {
     struct EscrowCreated {
         client: ContractAddress,
         provider_key_hash: felt252,
-        total_amount: u256,
+        total_amount: u128,
         service_period_blocks: u64
     }
 
     #[derive(Drop, starknet::Event)]
     struct EscrowDeposited {
         client: ContractAddress,
-        amount: u256
+        amount: u128
     }
 
     #[derive(Drop, starknet::Event)]
     struct EscrowClaimed {
         provider: ContractAddress,
-        amount: u256
+        amount: u128
     }
 
     #[derive(Drop, starknet::Event)]
@@ -83,15 +80,15 @@ pub mod Escrow {
         client: ContractAddress,
         provider_key_hash: felt252,
         blocks_served: u64,
-        provider_amount: u256,
-        client_refund: u256
+        provider_amount: u128,
+        client_refund: u128
     }
 
     // Struct to return escrow details
     #[derive(Drop, Serde)]
     pub struct EscrowDetails {
         pub provider_key_hash: felt252,
-        pub total_amount: u256,
+        pub total_amount: u128,
         pub service_period_blocks: u64,
         pub service_start_block: u64,
         pub is_completed: bool,
@@ -106,15 +103,18 @@ pub mod Escrow {
     fn constructor(
         ref self: ContractState,
         provider_key_hash: felt252,
-        total_amount: u256,
+        total_amount: u128,
         service_period_blocks: u64,
-        verifier: ContractAddress
+        verifier: ContractAddress,
+        strk_token: ContractAddress
     ) {
         // Set the escrow parameters
+        assert(provider_key_hash != 0, 'Provider addr must be non-zero');
         self.provider_key_hash.write(provider_key_hash);
         self.total_amount.write(total_amount);
         self.service_period_blocks.write(service_period_blocks);
         self.verifier.write(verifier);
+        self.strk_token.write(strk_token);
         
         // Set the client address
         let caller = get_caller_address();
@@ -155,17 +155,74 @@ pub mod Escrow {
         }
 
         fn calculate_proportional_amount(
-            total_amount: u256,
+            total_amount: u128,
             total_blocks: u64,
             blocks_served: u64
-        ) -> u256 {
-            // Calculate amount based on blocks served
-            let blocks_served_u256: u256 = blocks_served.into();
-            let total_blocks_u256: u256 = total_blocks.into();
+        ) -> u128 {
+            // Convert to u128 for calculation
+            let blocks_served_u128: u128 = blocks_served.into();
+            let total_blocks_u128: u128 = total_blocks.into();
             
-            // Use integer division to calculate proportional amount
-            // amount = total_amount * blocks_served / total_blocks
-            (total_amount * blocks_served_u256) / total_blocks_u256
+            // Calculate proportional amount using integer division
+            let result = (total_amount * blocks_served_u128) / total_blocks_u128;
+            
+            // Ensure we don't exceed total amount
+            if result > total_amount {
+                total_amount
+            } else {
+                result
+            }
+        }
+
+        fn to_u256(amount: u128) -> u256 {
+            u256 { low: amount.into(), high: 0 }
+        }
+
+        fn from_u256(amount: u256) -> u128 {
+            amount.low.into()
+        }
+
+        fn safe_transfer(
+            self: @ContractState,
+            token: IERC20Dispatcher,
+            recipient: ContractAddress,
+            amount: u128
+        ) -> bool {
+            // Convert to u256 for token operations
+            let amount_u256 = Self::to_u256(amount);
+            
+            // Check contract has sufficient balance
+            let contract_balance = token.balance_of(get_contract_address());
+            assert(contract_balance >= amount_u256, 'Insufficient contract balance');
+            
+            // Perform transfer
+            token.transfer(recipient, amount_u256)
+        }
+
+        fn validate_balance_for_operation(
+            self: @ContractState,
+            required_amount: u128
+        ) -> bool {
+            let strk = IERC20Dispatcher { contract_address: self.strk_token.read() };
+            let contract_balance = strk.balance_of(get_contract_address());
+            let required_u256 = Self::to_u256(required_amount);
+            contract_balance >= required_u256
+        }
+
+        fn get_service_status(self: @ContractState) -> u8 {
+            let current_block = starknet::get_block_number();
+            let start_block = self.service_start_block.read();
+            let period = self.service_period_blocks.read();
+            
+            if !self.is_deposited.read() {
+                0 // NotStarted
+            } else if current_block <= start_block {
+                1 // Pending
+            } else if current_block < start_block + period {
+                2 // Active
+            } else {
+                3 // Completed
+            }
         }
     }
 
@@ -197,13 +254,25 @@ pub mod Escrow {
             // Get the deposit amount
             let total_amount = self.total_amount.read();
             
-            // Transfer STRK tokens from client to contract
+            // Get contract addresses
             let this_contract = get_contract_address();
-            let strk_addr: ContractAddress = Token::STRK.contract_address();
+            let strk_addr = self.strk_token.read();
             let strk = IERC20Dispatcher { contract_address: strk_addr };
+            let client = self.client.read();
 
-            // This line casuses the error. Might be because of the allowance.
-            strk.transfer_from(self.client.read(), this_contract, total_amount);
+            // Convert amount to u256 for token operations
+            let amount_u256 = InternalFunctions::to_u256(total_amount);
+
+            // Check client has sufficient balance
+            let client_balance = strk.balance_of(client);
+            assert(client_balance >= amount_u256, 'Insufficient balance');
+
+            // Check allowance is sufficient
+            let allowance = strk.allowance(client, this_contract);
+            assert(allowance >= amount_u256, 'Insufficient allowance');
+            
+            // Transfer STRK tokens from client to contract
+            strk.transfer_from(client, this_contract, amount_u256);
             
             // Set the service start block after deposit
             let current_block = starknet::get_block_number();
@@ -215,7 +284,7 @@ pub mod Escrow {
             // Emit deposit event
             self.emit(Event::EscrowDeposited(
                 EscrowDeposited {
-                    client: self.client.read(),
+                    client: client,
                     amount: total_amount
                 }
             ));
@@ -234,45 +303,44 @@ pub mod Escrow {
             // Check if already claimed or disputed
             assert(!self.is_claimed.read(), 'Already claimed');
             assert(!self.is_disputed.read(), 'Contract disputed');
-
-            // Check if service period is complete
-            let current_block = starknet::get_block_number();
-            let start_block = self.service_start_block.read();
-            let period = self.service_period_blocks.read();
-            assert(current_block >= start_block + period, 'Service period not complete');
-
+            
+            // Check service status
+            let status = InternalFunctions::get_service_status(@self);
+            assert(status == 3, 'Service period not complete');
+            
             // Get the key hash and verifier
             let key_hash = self.provider_key_hash.read();
-            let verifier_address = self.verifier.read();
-            
-            // Create verifier dispatcher
             let verifier = IFalconSignatureVerifierDispatcher { 
-                contract_address: verifier_address 
+                contract_address: self.verifier.read() 
             };
-
+            
+            // Could try a pre-committed msg_point with signatures from both keys to 'activate' the agreement if the upstream lib became less 'steps' that it could be run twice
+            // TODO: Try ^ with 512 keys in case they are less steps to verify?
             // Verify the signature
             let is_valid = verifier.verify_signature_for_key_hash(
                 key_hash,
                 s1_coeffs,
-                msg_point
+                msg_point // Should be pre-determined?
             );
-
             assert(is_valid, 'Invalid signature');
-
-            // Mark as claimed
+            
+            // Set provider address and mark as claimed
+            let caller = get_caller_address();
+            self.provider.write(caller);
             self.is_claimed.write(true);
             self.is_completed.write(true);
             
-            // Set provider address
-            let caller = get_caller_address();
-            self.provider.write(caller);
-
-            // Transfer STRK tokens to provider
+            // Transfer tokens to provider
             let total_amount = self.total_amount.read();
-            let strk_addr: ContractAddress = Token::STRK.contract_address();
-            let strk = IERC20Dispatcher { contract_address: strk_addr };
-            strk.transfer(caller, total_amount);
-
+            let strk = IERC20Dispatcher { contract_address: self.strk_token.read() };
+            
+            // Validate and transfer
+            assert(
+                InternalFunctions::validate_balance_for_operation(@self, total_amount),
+                'Insufficient balance for claim'
+            );
+            InternalFunctions::safe_transfer(@self, strk, caller, total_amount);
+            
             // Emit claim event
             self.emit(Event::EscrowClaimed(
                 EscrowClaimed {
@@ -280,7 +348,7 @@ pub mod Escrow {
                     amount: total_amount
                 }
             ));
-
+            
             true
         }
 
@@ -295,20 +363,24 @@ pub mod Escrow {
             assert(!self.is_claimed.read(), 'Already claimed');
             assert(!self.is_disputed.read(), 'Already disputed');
             
-            // Calculate blocks served
+            // Get current status
+            let status = InternalFunctions::get_service_status(@self);
             let current_block = starknet::get_block_number();
             let start_block = self.service_start_block.read();
             let total_period = self.service_period_blocks.read();
             
-            // If dispute is before start, no payment is made
-            if current_block <= start_block {
+            // If not started or pending, return all funds to client
+            if status <= 1 {
                 let client = self.client.read();
                 let total_amount = self.total_amount.read();
+                let strk = IERC20Dispatcher { contract_address: self.strk_token.read() };
                 
-                // Return all funds to client
-                let strk_addr: ContractAddress = Token::STRK.contract_address();
-                let strk = IERC20Dispatcher { contract_address: strk_addr };
-                strk.transfer(client, total_amount);
+                // Validate and transfer
+                assert(
+                    InternalFunctions::validate_balance_for_operation(@self, total_amount),
+                    'Insufficient balance for refund'
+                );
+                InternalFunctions::safe_transfer(@self, strk, client, total_amount);
                 
                 // Emit dispute event
                 self.emit(Event::EscrowDisputed(
@@ -316,50 +388,54 @@ pub mod Escrow {
                         client,
                         provider_key_hash: self.provider_key_hash.read(),
                         blocks_served: 0,
-                        provider_amount: 0.into(),
+                        provider_amount: 0,
                         client_refund: total_amount
                     }
                 ));
                 
+                // Mark as disputed and completed
+                self.is_disputed.write(true);
+                self.is_completed.write(true);
+                
                 return true;
             }
             
-            // Calculate actual blocks served (cap at total period)
-            let blocks_served = if current_block - start_block > total_period {
+            // Calculate blocks served (capped at total period)
+            let blocks_served = if status == 3 {
                 total_period
             } else {
                 current_block - start_block
             };
             
-            // Calculate proportional amounts
+            // Calculate amounts
             let total_amount = self.total_amount.read();
             let provider_amount = InternalFunctions::calculate_proportional_amount(
                 total_amount, total_period, blocks_served
             );
             let client_refund = total_amount - provider_amount;
             
-            // Get addresses
+            // Get addresses and create token dispatcher
             let client = self.client.read();
-            let provider_key_hash = self.provider_key_hash.read();
+            let provider = self.provider.read();
+            let strk = IERC20Dispatcher { contract_address: self.strk_token.read() };
             
-            // Transfer tokens
-            let strk_addr: ContractAddress = Token::STRK.contract_address();
-            let strk = IERC20Dispatcher { contract_address: strk_addr };
+            // Validate total balance
+            assert(
+                InternalFunctions::validate_balance_for_operation(@self, total_amount),
+                'Insufficient balance to dispute'
+            );
             
-            // Send proportional amount to provider if they served any blocks
-            if provider_amount > 0.into() {
-                let provider = self.provider.read();
-                if !provider.is_zero() {
-                    strk.transfer(provider, provider_amount);
-                }
+            // Transfer to provider if applicable
+            if provider_amount > 0 && !provider.is_zero() {
+                InternalFunctions::safe_transfer(@self, strk, provider, provider_amount);
             }
             
-            // Return remaining funds to client
-            if client_refund > 0.into() {
-                strk.transfer(client, client_refund);
+            // Transfer remaining to client
+            if client_refund > 0 {
+                InternalFunctions::safe_transfer(@self, strk, client, client_refund);
             }
             
-            // Mark as disputed
+            // Mark as disputed and completed
             self.is_disputed.write(true);
             self.is_completed.write(true);
             
@@ -367,7 +443,7 @@ pub mod Escrow {
             self.emit(Event::EscrowDisputed(
                 EscrowDisputed {
                     client,
-                    provider_key_hash,
+                    provider_key_hash: self.provider_key_hash.read(),
                     blocks_served,
                     provider_amount,
                     client_refund
@@ -385,7 +461,7 @@ pub mod Escrow {
             let this_contract = get_contract_address();
             
             // Create STRK token dispatcher
-            let strk_addr: ContractAddress = Token::STRK.contract_address();
+            let strk_addr = self.strk_token.read();
             let strk = IERC20Dispatcher { contract_address: strk_addr };
             
             // Return the allowance

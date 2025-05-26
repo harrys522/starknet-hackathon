@@ -1,10 +1,8 @@
 use core::array::{ArrayTrait, Span, SpanTrait};
-use core::poseidon::poseidon_hash_span;
 use core::traits::{Into, TryInto};
 
 use moosh_id::keyregistry::FalconPublicKeyRegistry::{
     IFalconPublicKeyRegistryDispatcher,
-    IFalconPublicKeyRegistryDispatcherTrait,
     PK_SIZE_512, PK_SIZE_1024
 };
 
