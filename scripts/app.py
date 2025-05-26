@@ -1,5 +1,7 @@
 import gradio as gr
 import asyncio
+import time
+import traceback
 
 # Import functions from your scripts directory
 from cairo_interactions import (
@@ -7,14 +9,20 @@ from cairo_interactions import (
     FALCON_KEY_REGISTRY_CONTRACT_HASH,
     NODE_URL,
     ESCROW_CONTRACT_HASH,
-
+    get_deployer_account,
 )
 
+from starknet_py.contract import Contract
+from starknet_py.net.full_node_client import FullNodeClient
+from utils import FALCON_ESCROW_ABI
 # --- Gradio UI Definition ---
 with gr.Blocks(...) as demo:
-    # --- State Variables to hold credentials ---
+    # --- State Variables to hold credentials and contract info ---
     user_private_key_state = gr.State(None)
     user_account_address_state = gr.State(None)
+    deployed_contract_address_state = gr.State(None)
+    service_period_state = gr.State(None)
+    service_start_block_state = gr.State(None)
 
     # --- UI Element Definitions (for referencing in callbacks) ---
     # Entry Screen Elements
@@ -94,6 +102,116 @@ with gr.Blocks(...) as demo:
             # user_account_address_state: None,
         }
 
+    async def get_contract_status(contract_address: str, private_key: str, account_address: str):
+        """Fetches the current status of the escrow contract"""
+        if not contract_address:
+            return "No contract deployed", 0, 0, 0, False, 0
+        
+        try:
+            deployer_account = await get_deployer_account(private_key, account_address)
+            if not deployer_account:
+                return "Failed to initialize account", 0, 0, 0, False, 0
+
+            contract = Contract(
+                address=int(contract_address, 16),
+                abi=FALCON_ESCROW_ABI,
+                provider=deployer_account
+            )
+
+            # Get current block number
+            client = FullNodeClient(node_url=NODE_URL)
+            current_block = await client.get_block_number()
+            
+            # Get escrow details - returns a single struct
+            details = (await contract.functions["get_escrow_details"].call())[0]
+            
+            # Access struct fields
+            service_start_block = details["service_start_block"]
+            service_period_blocks = details["service_period_blocks"]
+            is_disputed = details["is_disputed"]
+            is_deposited = details["is_deposited"]
+            total_amount = details["total_amount"]
+            
+            if service_start_block == 0:
+                return "Service not started", 0, service_period_blocks, 0, is_disputed, total_amount
+            
+            blocks_elapsed = current_block - service_start_block
+            blocks_remaining = max(0, service_period_blocks - blocks_elapsed)
+            
+            status = "In Progress"
+            if blocks_remaining == 0:
+                status = "Completed"
+            elif is_disputed:
+                status = "Disputed"
+            elif not is_deposited:
+                status = "Awaiting Deposit"
+            
+            return status, blocks_elapsed, service_period_blocks, blocks_remaining, is_disputed, total_amount
+            
+        except Exception as e:
+            print(f"Error getting contract status: {e}")
+            traceback.print_exc()
+            return f"Error: {str(e)}", 0, 0, 0, False, 0
+
+    async def handle_dispute_action(contract_address: str, private_key: str, account_address: str) -> str:
+        """Handles the dispute action for the escrow contract"""
+        if not contract_address:
+            return "No contract deployed"
+        
+        try:
+            deployer_account = await get_deployer_account(private_key, account_address)
+            if not deployer_account:
+                return "Failed to initialize account"
+
+            contract = Contract(
+                address=int(contract_address, 16),
+                abi=FALCON_ESCROW_ABI,
+                provider=deployer_account
+            )
+            
+            # Call dispute function
+            invoke_result = await contract.functions["dispute"].invoke_v3(
+                auto_estimate=True
+            )
+            
+            await invoke_result.wait_for_acceptance()
+            return f"Dispute initiated successfully. Transaction hash: {hex(invoke_result.hash)}"
+            
+        except Exception as e:
+            print(f"Error disputing contract: {e}")
+            return f"Error: {str(e)}"
+
+    def update_countdown(
+        contract_address: str,
+        private_key: str,
+        account_address: str
+    ):
+        """Updates the countdown display"""
+        if not contract_address:
+            return "No contract deployed", "", gr.update(visible=False), "No amount to display"
+            
+        status, blocks_elapsed, total_blocks, blocks_remaining, is_disputed, total_amount = asyncio.run(
+            get_contract_status(
+                contract_address,
+                private_key,
+                account_address
+            )
+        )
+        
+        progress = f"Blocks elapsed: {blocks_elapsed} / {total_blocks}"
+        # Calculate refund amount with proper STRK decimal handling (18 decimals)
+        if blocks_elapsed > 0 and total_blocks > 0:
+            earned_amount = (total_amount * blocks_elapsed) // total_blocks
+            earned_amount_strk = earned_amount / (10**18)
+            total_amount_strk = total_amount / (10**18)  # Convert from wei to STRK
+            amount_refund = f"Amount to refund : {total_amount_strk - earned_amount_strk:.6f} STRK"
+        else:
+            amount_refund = f"Total escrow amount: {total_amount / (10**18):.6f} STRK"
+            
+        dispute_visible = not is_disputed and blocks_remaining > 0
+        
+        return status, progress, gr.update(visible=dispute_visible), amount_refund
+
     def handle_deploy_escrow_action(
         private_key: str,
         account_address: str,
@@ -105,16 +223,16 @@ with gr.Blocks(...) as demo:
         strk_token_address: str,
         provider_address: str,
         listing_id: str,
-    ) -> str:
+    ) -> tuple:
         """
         Handles the deployment of a new escrow contract.
-        Returns a status message string.
+        Returns (status_message, contract_address)
         """
         if not all([
             private_key, account_address, provider_key_hash, verifier_address,
             key_registry_address, strk_token_address, provider_address, listing_id
         ]):
-            return "Error: All fields are required"
+            return "Error: All fields are required", None, None
 
         try:
             # Ensure hex strings start with 0x
@@ -154,12 +272,13 @@ with gr.Blocks(...) as demo:
             
             contract_address, tx_hash = result
             if tx_hash:
-                return f"Escrow deployment successful!\nContract Address: {contract_address}\nTransaction Hash: {tx_hash}\nListing ID: {listing_id}"
+                status_msg = f"Escrow deployment successful!\nContract Address: {contract_address}\nTransaction Hash: {tx_hash}\nListing ID: {listing_id}"
+                return status_msg, contract_address, service_period
             else:
-                return f"Deployment failed: {contract_address}"  # In this case, contract_address contains the error message
+                return f"Deployment failed: {contract_address}", None, None
                 
         except Exception as e:
-            return f"Error deploying escrow contract: {str(e)}"
+            return f"Error deploying escrow contract: {str(e)}", None, None
 
     # --- Action Handler for Deployment (Provider Page) ---
     def handle_deploy_falcon_registry_action(current_pk_state, current_aa_state):
@@ -226,7 +345,7 @@ with gr.Blocks(...) as demo:
 
     # Screen 2: Client Page (Initially Hidden)
     with gr.Group(visible=False) as cp_group_ui:
-        client_page_group_comp = cp_group_ui  # Assign
+        client_page_group_comp = cp_group_ui
         with gr.Column():
             gr.Markdown("<h1 style='text-align: center;'>Client Page</h1>")
             
@@ -283,6 +402,33 @@ with gr.Blocks(...) as demo:
                     label="Deployment Status", 
                     lines=4,
                     interactive=False
+                )
+
+            # Contract Status Section
+            with gr.Accordion("Contract Status", open=True):
+                status_text = gr.Textbox(
+                    label="Status",
+                    interactive=False,
+                    value="No contract deployed"
+                )
+                progress_text = gr.Textbox(
+                    label="Progress",
+                    interactive=False,
+                    value=""
+                )
+                amount_refund = gr.Textbox(
+                    label="Amount Status",
+                    interactive=False,
+                    value="No amount to display"
+                )
+                dispute_btn = gr.Button(
+                    "🚫 Dispute Contract",
+                    visible=False
+                )
+                dispute_output = gr.Textbox(
+                    label="Dispute Status",
+                    interactive=False,
+                    visible=True
                 )
 
             gr.Markdown("---")  # Separator
@@ -380,7 +526,34 @@ with gr.Blocks(...) as demo:
             provider_address_input,
             listing_id_input,
         ],
-        outputs=[deploy_escrow_output],
+        outputs=[
+            deploy_escrow_output,
+            deployed_contract_address_state,
+            service_period_state
+        ]
+    )
+
+    # Event handler for dispute button
+    dispute_btn.click(
+        fn=lambda x,y,z: asyncio.run(handle_dispute_action(x,y,z)),
+        inputs=[
+            deployed_contract_address_state,
+            user_private_key_state,
+            user_account_address_state
+        ],
+        outputs=[dispute_output]
+    )
+
+    # Setup auto-updating countdown
+    demo.load(
+        fn=update_countdown,
+        inputs=[
+            deployed_contract_address_state,
+            user_private_key_state,
+            user_account_address_state
+        ],
+        outputs=[status_text, progress_text, dispute_btn, amount_refund],
+        every=5  # Update every 5 seconds
     )
 
 if __name__ == "__main__":
