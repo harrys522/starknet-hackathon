@@ -7,6 +7,7 @@ use moosh_id::keyregistry::FalconPublicKeyRegistry::{
     IFalconPublicKeyRegistryDispatcherTrait,
     PK_SIZE_512, PK_SIZE_1024
 };
+
 use snforge_std::{declare, ContractClassTrait, DeclareResultTrait};
 
 /// Deploys a new instance of the FalconPublicKeyRegistry contract
