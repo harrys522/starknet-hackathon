@@ -4,10 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "falcon"
-version = "0.1.0"
-authors = [
-    { name="Thomas Prest", email="thomas.prest@ens.fr" },
-]
+version = "0.0.0"
+authors = [{ name = "Thomas Prest", email = "thomas.prest@ens.fr" }]
 description = "A Python implementation of the Falcon signature scheme"
 requires-python = ">=3.7"
 classifiers = [
@@ -16,4 +14,4 @@ classifiers = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["src"] 
+where = ["src"]
