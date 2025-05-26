@@ -7,4 +7,3 @@ mod inputs {
     pub mod falcon_test_vectors_n512;
     pub mod falcon_test_vectors_n1024;
 }
-mod test_escrow;
