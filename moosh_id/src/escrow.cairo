@@ -106,19 +106,24 @@ pub mod Escrow {
         total_amount: u128,
         service_period_blocks: u64,
         verifier: ContractAddress,
-        strk_token: ContractAddress
+        strk_token: ContractAddress,
+        client_address: ContractAddress,
+        provider_address: ContractAddress
     ) {
         // Set the escrow parameters
         assert(provider_key_hash != 0, 'Provider addr must be non-zero');
+        assert(!client_address.is_zero(), 'Client addr must be non-zero');
+        assert(!provider_address.is_zero(), 'Provider addr must be non-zero');
+        
         self.provider_key_hash.write(provider_key_hash);
         self.total_amount.write(total_amount);
         self.service_period_blocks.write(service_period_blocks);
         self.verifier.write(verifier);
         self.strk_token.write(strk_token);
         
-        // Set the client address
-        let caller = get_caller_address();
-        self.client.write(caller);
+        // Set the client and provider addresses from parameters
+        self.client.write(client_address);
+        self.provider.write(provider_address);
         
         // Initialize state
         self.is_completed.write(false);
@@ -129,7 +134,7 @@ pub mod Escrow {
         // Emit creation event
         self.emit(Event::EscrowCreated(
             EscrowCreated {
-                client: caller,
+                client: client_address,
                 provider_key_hash,
                 total_amount,
                 service_period_blocks

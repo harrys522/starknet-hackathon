@@ -20,6 +20,7 @@ use snforge_std::{
     DeclareResultTrait,
     start_cheat_caller_address_global,
     start_cheat_block_number,
+    Token, TokenImpl, TokenTrait, set_balance
     // Token, TokenImpl, TokenTrait, set_balance
     
 };
@@ -45,7 +46,6 @@ const MOCK_PROVIDER_KEY_HASH: felt252 = 0x456;
 const MOCK_SERVICE_PERIOD: u64 = 100;
 const MOCK_TOTAL_AMOUNT: u128 = 1000000000000000000;  // Increased to 1e18 (1 full token)
 const INITIAL_BALANCE: u256 = u256 { low: 1000000000000000000000, high: 0 }; // Increased to 1000e18
-const ERC20_RECIPIENT_INITIAL_SUPPLY: felt252 = 0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef;
 
 fn to_u256(amount: u128) -> u256 {
     u256 { low: amount.into(), high: 0 }
@@ -67,17 +67,6 @@ fn deploy_verifier(key_registry_addr: ContractAddress) -> IFalconSignatureVerifi
     IFalconSignatureVerifierDispatcher { contract_address }
 }
 
-// Helper function to deploy a new ESC token for testing
-fn deploy_esc_token(recipient: ContractAddress, initial_supply: u256) -> IERC20Dispatcher {
-    let contract = declare("ESCToken").unwrap().contract_class();
-    let constructor_args = array![
-        initial_supply.low.into(),
-        initial_supply.high.into(),
-        recipient.into(),
-    ];
-    let (contract_address, _) = contract.deploy(@constructor_args).unwrap();
-    IERC20Dispatcher { contract_address }
-}
 
 // Helper function to deploy the escrow contract
 fn deploy_escrows(strk_token_dispatcher: IERC20Dispatcher) -> IEscrowDispatcher {
@@ -127,9 +116,10 @@ impl EscrowStateChecksDefault of Default<EscrowStateChecks> {
 
 fn setup_test_environment() -> (ContractAddress, IERC20Dispatcher) {
     let user_address: ContractAddress = 0x123.try_into().unwrap();
-    let esc_token_dispatcher = deploy_esc_token(user_address, INITIAL_BALANCE);
+    let strk_addr = token::STRK.contract_address().into();
     start_cheat_caller_address_global(caller_address: user_address);
-    (user_address, esc_token_dispatcher)
+    set_balance(user_address, 1_000_000, Token::STRK);
+    (user_address, strk_addr)
 }
 
 fn assert_token_balance(token: IERC20Dispatcher, account: ContractAddress, expected_balance: u256) {
@@ -510,69 +500,6 @@ fn test_dispute_after_deposit() {
     assert_token_balance(token, user_address, INITIAL_BALANCE);
 }
 
-#[test]
-fn test_deploy_esc_token() {
-    // Setup recipient address
-    let recipient: ContractAddress = ERC20_RECIPIENT_INITIAL_SUPPLY.try_into().unwrap();
-    
-    // Deploy token
-    let token = deploy_esc_token(recipient, INITIAL_BALANCE);
-    
-    // Verify total supply
-    let total_supply = token.total_supply();
-    assert(total_supply == INITIAL_BALANCE, 'Wrong total supply');
-    
-    // Check initial balance was minted to recipient
-    let recipient_balance = token.balance_of(recipient);
-    assert(recipient_balance == INITIAL_BALANCE, 'Initial balance not minted');
-    assert(recipient_balance == total_supply, 'Supply mismatch');
-    
-    // Verify zero balance for other addresses
-    let other_address: ContractAddress = 123.try_into().unwrap();
-    let other_balance = token.balance_of(other_address);
-    assert(other_balance == u256 { low: 0, high: 0 }, 'Other balance should be 0');
-}
-
-#[test]
-fn test_token_approval() {
-    // Setup
-    let (user_address, token) = setup_test_environment();
-    let spender: ContractAddress = 0x123.try_into().unwrap();
-    
-    // Ensure we're the token owner
-    start_cheat_caller_address_global(caller_address: user_address);
-    
-    // Verify initial state
-    let initial_balance = token.balance_of(user_address);
-    assert(initial_balance == INITIAL_BALANCE, 'Wrong initial balance');
-    
-    let initial_allowance = token.allowance(user_address, spender);
-    assert(initial_allowance == u256 { low: 0, high: 0 }, 'Initial allowance not zero');
-    
-    // Do approval
-    let amount = to_u256(MOCK_TOTAL_AMOUNT);
-    let success = token.approve(spender, amount);
-    assert(success, 'Approval failed');
-    
-    // Check allowance
-    let final_allowance = token.allowance(user_address, spender);
-    assert(final_allowance == amount, 'Allowance not set correctly');
-    
-    // Verify balance unchanged
-    let final_balance = token.balance_of(user_address);
-    assert(final_balance == INITIAL_BALANCE, 'Balance changed after approve');
-}
-
-fn print_token_state(token: IERC20Dispatcher, owner: ContractAddress, spender: ContractAddress) {
-    let balance = token.balance_of(owner);
-    let allowance = token.allowance(owner, spender);
-    let total_supply = token.total_supply();
-    
-    // Print using assert messages since we don't have println
-    assert(balance == balance, 'Balance: {balance}');
-    assert(allowance == allowance, 'Allowance: {allowance}');
-    assert(total_supply == total_supply, 'Supply: {total_supply}');
-}
 
 #[test]
 fn test_allowance_consumption() {
