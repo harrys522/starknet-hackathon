@@ -6,6 +6,8 @@ from cairo_interactions import (
     deploy_new_contract_instance,
     FALCON_KEY_REGISTRY_CONTRACT_HASH,
     NODE_URL,
+    ESCROW_CONTRACT_HASH,
+
 )
 
 # --- Gradio UI Definition ---
@@ -86,13 +88,78 @@ with gr.Blocks(...) as demo:
             entry_screen_group_comp: gr.update(visible=True),
             client_page_group_comp: gr.update(visible=False),
             provider_page_group_comp: gr.update(visible=False),
-            input_account_address_comp: gr.update(
-                value=""
-            ),  # Clear input fields on return
+            input_account_address_comp: gr.update(value=""),  # Clear input fields on return
             input_private_key_comp: gr.update(value=""),  # Clear input fields on return
             # user_private_key_state: None, # Optionally clear state too
             # user_account_address_state: None,
         }
+
+    def handle_deploy_escrow_action(
+        private_key: str,
+        account_address: str,
+        provider_key_hash: str,
+        total_amount: float,
+        service_period: int,
+        verifier_address: str,
+        key_registry_address: str,
+        strk_token_address: str,
+        provider_address: str,
+        listing_id: str,
+    ) -> str:
+        """
+        Handles the deployment of a new escrow contract.
+        Returns a status message string.
+        """
+        if not all([
+            private_key, account_address, provider_key_hash, verifier_address,
+            key_registry_address, strk_token_address, provider_address, listing_id
+        ]):
+            return "Error: All fields are required"
+
+        try:
+            # Ensure hex strings start with 0x
+            provider_key_hash = provider_key_hash if provider_key_hash.startswith("0x") else f"0x{provider_key_hash}"
+            verifier_address = verifier_address if verifier_address.startswith("0x") else f"0x{verifier_address}"
+            key_registry_address = key_registry_address if key_registry_address.startswith("0x") else f"0x{key_registry_address}"
+            strk_token_address = strk_token_address if strk_token_address.startswith("0x") else f"0x{strk_token_address}"
+            provider_address = provider_address if provider_address.startswith("0x") else f"0x{provider_address}"
+            
+            # Convert total_amount from float to u128 (assuming STRK has 18 decimals)
+            total_amount_u128 = int(total_amount * 10**18)
+            
+            # Convert service_period to u64
+            service_period_u64 = int(service_period)
+            
+            # Prepare constructor arguments
+            constructor_args = [
+                provider_key_hash,  # felt252 (hex string)
+                total_amount_u128,  # u128 (integer)
+                service_period_u64,  # u64 (integer)
+                verifier_address,  # ContractAddress (hex string)
+                key_registry_address,  # ContractAddress (hex string)
+                strk_token_address,  # ContractAddress (hex string)
+                account_address,  # client_address (hex string)
+                provider_address,  # provider_address (hex string)
+            ]
+            
+            # Deploy the contract
+            result = asyncio.run(
+                deploy_new_contract_instance(
+                    ESCROW_CONTRACT_HASH,
+                    private_key,
+                    account_address,
+                    constructor_args,
+                )
+            )
+            
+            contract_address, tx_hash = result
+            if tx_hash:
+                return f"Escrow deployment successful!\nContract Address: {contract_address}\nTransaction Hash: {tx_hash}\nListing ID: {listing_id}"
+            else:
+                return f"Deployment failed: {contract_address}"  # In this case, contract_address contains the error message
+                
+        except Exception as e:
+            return f"Error deploying escrow contract: {str(e)}"
 
     # --- Action Handler for Deployment (Provider Page) ---
     def handle_deploy_falcon_registry_action(current_pk_state, current_aa_state):
@@ -162,8 +229,63 @@ with gr.Blocks(...) as demo:
         client_page_group_comp = cp_group_ui  # Assign
         with gr.Column():
             gr.Markdown("<h1 style='text-align: center;'>Client Page</h1>")
-            gr.Markdown("This is where client-specific interactions will go.")
-            # Add client-specific components here
+            
+            # Deploy Escrow Section
+            with gr.Accordion("Deploy Escrow Contract", open=True):
+                gr.Markdown("Deploy a new escrow contract to secure your service agreement.")
+                
+                # Input fields for constructor arguments
+                provider_key_hash_input = gr.Textbox(
+                    label="Provider's Key Hash (hex)",
+                    placeholder="0x...",
+                    info="The hash of the provider's public key"
+                )
+                total_amount_input = gr.Number(
+                    label="Total Amount (STRK)",
+                    value=1,
+                    minimum=0,
+                    info="Amount of STRK tokens to be held in escrow"
+                )
+                service_period_input = gr.Number(
+                    label="Service Period (blocks)",
+                    value=100,
+                    minimum=1,
+                    info="Duration of service in blocks"
+                )
+                verifier_address_input = gr.Textbox(
+                    label="Verifier Contract Address (hex)",
+                    placeholder="0x...",
+                    info="Address of the Falcon signature verifier contract"
+                )
+                key_registry_address_input = gr.Textbox(
+                    label="Key Registry Contract Address (hex)",
+                    placeholder="0x...",
+                    info="Address of the Falcon public key registry contract"
+                )
+                strk_token_address_input = gr.Textbox(
+                    label="STRK Token Contract Address (hex)",
+                    placeholder="0x...",
+                    info="Address of the STRK token contract"
+                )
+                provider_address_input = gr.Textbox(
+                    label="Provider Address (hex)",
+                    placeholder="0x...",
+                    info="Starknet address of the service provider"
+                )
+                listing_id_input = gr.Textbox(
+                    label="Listing ID",
+                    placeholder="Enter the listing ID",
+                    info="Identifier for this service agreement"
+                )
+                
+                deploy_escrow_btn = gr.Button("🚀 Deploy Escrow")
+                deploy_escrow_output = gr.Textbox(
+                    label="Deployment Status", 
+                    lines=4,
+                    interactive=False
+                )
+
+            gr.Markdown("---")  # Separator
             back_btn_client = gr.Button("⬅️ Back to Home")
 
     # Screen 3: Provider Page (Initially Hidden)
@@ -243,9 +365,28 @@ with gr.Blocks(...) as demo:
         outputs=[deploy_falcon_output],
     )
 
+    # Event handler for the escrow deployment button on the Client page
+    deploy_escrow_btn.click(
+        fn=handle_deploy_escrow_action,
+        inputs=[
+            user_private_key_state,
+            user_account_address_state,
+            provider_key_hash_input,
+            total_amount_input,
+            service_period_input,
+            verifier_address_input,
+            key_registry_address_input,
+            strk_token_address_input,
+            provider_address_input,
+            listing_id_input,
+        ],
+        outputs=[deploy_escrow_output],
+    )
+
 if __name__ == "__main__":
     # Make sure NODE_URL in cairo_interactions.py is set!
     if NODE_URL == "YOUR_STARKNET_NODE_URL":  # Basic check
         print("\n\nCRITICAL: NODE_URL is not set in scripts/cairo_interactions.py!")
         print("Please configure it before running the application.\n\n")
+    
     demo.launch()

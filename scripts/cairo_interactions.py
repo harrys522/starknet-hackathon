@@ -1,6 +1,9 @@
 # scripts/cairo_interactions.py
+import json
 import random
 import traceback
+from typing import Optional, Tuple, List, Union
+
 from starknet_py.net.full_node_client import FullNodeClient
 from starknet_py.net.account.account import Account
 from starknet_py.net.models import StarknetChainId, InvokeV3
@@ -10,7 +13,9 @@ from starknet_py.constants import (
 )
 from starknet_py.hash.selector import get_selector_from_name
 from starknet_py.hash.address import compute_address
-from starknet_py.net.client_models import Call, ResourceBounds
+from starknet_py.net.client_models import Call, ResourceBounds, ResourceBoundsMapping
+from starknet_py.contract import Contract
+from utils import FALCON_KEY_REGISTRY_ABI, FALCON_VERIFIER_ABI, FALCON_ESCROW_ABI,MSG_POINT
 
 # --- Configuration ---
 # Class hashes are defined as strings with "0x" prefix
@@ -21,7 +26,7 @@ FALCON_ADDRESS_BASED_VERIFIER_CONTRACT_HASH = (
     "0x0396507525F71D979D306DF5B72C568DFCCA173158086D73806E496B054670A3"
 )
 ESCROW_CONTRACT_HASH = (
-    "0x03C435E79CB8246F1351C5CFE92DD7D1FF6D2A684395E5BC7D5F0792ED46B147"
+    "0x0028172888cc58dece1ccaaadcd0b8076eb85f0284f95aecd28027042b0f64a9"
 )
 
 # IMPORTANT: Configure your Node URL properly.
@@ -41,7 +46,7 @@ def _hex_str_to_int(hex_str: str) -> int:
 
 async def get_deployer_account(
     private_key_hex: str, account_address_hex: str
-) -> Account | None:
+) -> Optional[Account]:
     """
     Initializes and returns an Account instance for deploying contracts,
     using the provided private key and account address.
@@ -85,8 +90,8 @@ async def deploy_new_contract_instance(
     class_hash_hex: str,
     deployer_private_key_hex: str,
     deployer_account_address_hex: str,
-    constructor_args: list | None = None,
-) -> tuple[str | None, str | None]:
+    constructor_args: Optional[List[Union[str, int]]] = None,
+) -> Tuple[Optional[str], Optional[str]]:
     """
     Deploys a new contract instance using its class hash via the Universal Deployer Contract (UDC).
     Returns (deployed_contract_address_hex, transaction_hash_hex) or (error_message_str, None).
@@ -108,203 +113,156 @@ async def deploy_new_contract_instance(
     try:
         prepared_constructor_calldata = []
         for arg in constructor_args:
-            if isinstance(arg, str):
+            if isinstance(arg, str) and arg.startswith("0x"):
+                # Convert hex strings to integers
                 prepared_constructor_calldata.append(_hex_str_to_int(arg))
-            elif isinstance(arg, int):
-                prepared_constructor_calldata.append(arg)
+            elif isinstance(arg, str) and arg.isdigit():
+                # Convert numeric strings to integers
+                prepared_constructor_calldata.append(int(arg))
+            elif isinstance(arg, (int, float)):
+                # Pass numbers directly
+                prepared_constructor_calldata.append(int(arg))
             else:
-                raise ValueError(f"Unsupported constructor argument type: {type(arg)}")
+                raise ValueError(f"Unsupported constructor argument type or format: {type(arg)} - {arg}")
 
-        salt = random.randint(0, 2**128 - 1)
-        unique_flag = (
-            0  # Common for UDC deployments to make address dependent on salt & calldata
-        )
-
-        # Use compute_contract_address for UDC deployments for semantic clarity
-        expected_address = compute_address(
-            salt=salt,
-            class_hash=class_hash_int,
-            constructor_calldata=prepared_constructor_calldata,
-            deployer_address=int(
-                DEFAULT_DEPLOYER_ADDRESS, 16
-            ),  # This is the UDC's address
-        )
-
-        print(f"Attempting to deploy contract with class hash: {hex(class_hash_int)}")
-        print(f"Salt: {salt}")
-        print(f"Constructor Calldata: {prepared_constructor_calldata}")
-        print(f"Expected Contract Address: {hex(expected_address)}")
-
-        udc_calldata = [
-            class_hash_int,
-            salt,
-            unique_flag,
-            len(prepared_constructor_calldata),
-            *prepared_constructor_calldata,
-        ]
-
-        udc_deploy_call = Call(
-            to_addr=int(DEFAULT_DEPLOYER_ADDRESS, 16),
-            selector=get_selector_from_name("deployContract"),
-            calldata=udc_calldata,
-        )
-
-        # print("Estimating fee for V3 transaction...")
-        # try:
-        #     # Pass the Call object directly as the first positional argument
-        #     transaction = InvokeV3(
-        #         calldata=udc_deploy_call,
-        #         resource_bounds=ResourceBoundsMapping.init_with_zeros(),
-        #         signature=[],
-        #         nonce=nonce,
-        #         sender_address=self.address,
-        #         version=3,
-        #     )
-        #     estimated_fee = await deployer_account.estimate_fee(transaction)
-        #     print(f"Raw estimated fee object: {estimated_fee}")
-
-        #     # Try to use resource_bounds directly from the estimate if available (common in newer starknet-py)
-        #     if hasattr(estimated_fee, "resource_bounds") and isinstance(
-        #         estimated_fee.resource_bounds, dict
-        #     ):
-        #         resource_bounds_dict = estimated_fee.resource_bounds
-        #         # Apply a buffer to max_amount for safety
-        #         if "l1_gas" in resource_bounds_dict and hasattr(
-        #             resource_bounds_dict["l1_gas"], "max_amount"
-        #         ):
-        #             resource_bounds_dict["l1_gas"].max_amount = int(
-        #                 resource_bounds_dict["l1_gas"].max_amount * 1.5
-        #             )
-        #         if "l2_gas" in resource_bounds_dict and hasattr(
-        #             resource_bounds_dict["l2_gas"], "max_amount"
-        #         ):
-        #             resource_bounds_dict["l2_gas"].max_amount = int(
-        #                 resource_bounds_dict["l2_gas"].max_amount * 1.5
-        #             )
-        #         print(
-        #             f"Using resource_bounds from estimate_fee: {resource_bounds_dict}"
-        #         )
-        #     elif hasattr(estimated_fee, "l1_gas_usage") and hasattr(
-        #         estimated_fee, "l1_gas_price"
-        #     ):  # Example for older structure
-        #         # This part is more speculative as EstimatedFee structure can vary.
-        #         # You might need to adjust based on the actual attributes of `estimated_fee`.
-        #         print(
-        #             "Constructing resource_bounds from detailed fee components (experimental)."
-        #         )
-        #         l1_max_amount = int(estimated_fee.l1_gas_usage * 1.5)
-        #         l1_max_price = int(
-        #             estimated_fee.l1_gas_price * 1.5
-        #         )  # Or use current L1 gas price
-        #         l2_max_amount = int(estimated_fee.gas_usage * 1.5)  # L2 gas (steps)
-        #         l2_max_price = int(
-        #             estimated_fee.gas_price * 1.5
-        #         )  # L2 gas price (FRI/step)
-        #         resource_bounds_dict = {
-        #             "l1_gas": ResourceBounds(
-        #                 max_amount=l1_max_amount, max_price_per_unit=l1_max_price
-        #             ),
-        #             "l2_gas": ResourceBounds(
-        #                 max_amount=l2_max_amount, max_price_per_unit=l2_max_price
-        #             ),
-        #         }
-        #         print(f"Manually constructed resource_bounds: {resource_bounds_dict}")
-        #     else:
-        #         # Fallback if structure is unknown or very minimal (e.g., only overall_fee)
-        #         # This requires making broad assumptions and is less reliable.
-        #         print(
-        #             "Warning: Could not determine detailed resource bounds from estimate_fee. Using fallback."
-        #         )
-        #         # This will likely fail if node expects explicit l1_gas and l2_gas bounds.
-        #         # For V3, you typically need to provide both L1 and L2 gas bounds.
-        #         # Using overall_fee directly is more like V1's max_fee.
-        #         # A more robust fallback would query current L1 gas price.
-        #         # Placeholder to illustrate structure, actual values need to be sensible.
-        #         example_l1_max_amount = 30000  # Placeholder value for L1 gas units
-        #         example_l1_max_price = int(10 * 10**9)  # Placeholder: 10 Gwei in Wei
-        #         example_l2_max_amount = (
-        #             int(estimated_fee.gas_usage * 1.5)
-        #             if hasattr(estimated_fee, "gas_usage")
-        #             else 500000
-        #         )
-        #         example_l2_max_price = (
-        #             int(estimated_fee.gas_price * 1.5)
-        #             if hasattr(estimated_fee, "gas_price")
-        #             else int(10 * 10**9)
-        #         )
-
-        #         resource_bounds_dict = {
-        #             "l1_gas": ResourceBounds(
-        #                 max_amount=example_l1_max_amount,
-        #                 max_price_per_unit=example_l1_max_price,
-        #             ),
-        #             "l2_gas": ResourceBounds(
-        #                 max_amount=example_l2_max_amount,
-        #                 max_price_per_unit=example_l2_max_price,
-        #             ),
-        #         }
-        #         print(f"Fallback resource_bounds: {resource_bounds_dict}")
-
-        # except Exception as fee_error:
-        #     print(f"Error during fee estimation: {fee_error}")
-        #     traceback.print_exc()
-        #     return f"Deployment Error: Fee estimation failed - {fee_error}", None
-
-        print("Signing and sending V3 deployment transaction via UDC...")
-        resp = await deployer_account.sign_invoke_v3(
-            calls=udc_deploy_call,
-            # resource_bounds=resource_bounds_dict,
-            auto_estimate=True,  # DOESNT WORK! unexpected field l1_data_gas
-        )
-
-        print(f"Deployment transaction sent. Hash: {hex(resp.transaction_hash)}")
-        print("Waiting for transaction acceptance...")
-        receipt = await deployer_account.client.wait_for_tx(
-            resp.transaction_hash, wait_for_accept=True
-        )
-
-        # Try to get deployed address from receipt directly first
-        actual_deployed_address = (
-            receipt.contract_address
-            if receipt.contract_address and receipt.contract_address != 0
-            else None
-        )
-
-        if (
-            not actual_deployed_address
-        ):  # Fallback to event parsing if not in receipt directly
-            contract_deployed_event_selector = get_selector_from_name(
-                "ContractDeployed"
-            )
-            for event in receipt.events:
-                if (
-                    event.from_address == DEFAULT_DEPLOYER_ADDRESS
-                    and event.keys
-                    and event.keys[0] == contract_deployed_event_selector
-                ):
-                    # Standard UDC ContractDeployed event data[0] is the deployed contract address
-                    if event.data and len(event.data) > 0:
-                        actual_deployed_address = event.data[0]
-                        break
-
-        if actual_deployed_address:
-            deployed_address_hex = hex(actual_deployed_address)
-            print(
-                f"Transaction accepted! Contract deployed at address: {deployed_address_hex}"
-            )
-            if deployed_address_hex.lower() != hex(expected_address).lower():
-                print(
-                    f"Warning: Deployed address {deployed_address_hex} differs from pre-computed address {hex(expected_address)}! This can happen due to different address computation versions or parameters."
-                )
-            return deployed_address_hex, hex(resp.transaction_hash)
+        print(f"Deploying contract with class hash: {class_hash_hex}")
+        print(f"Constructor args: {prepared_constructor_calldata}")
+        
+        # Select the appropriate ABI based on the class hash
+        if class_hash_hex == FALCON_KEY_REGISTRY_CONTRACT_HASH:
+            abi = FALCON_KEY_REGISTRY_ABI
+        elif class_hash_hex == FALCON_ADDRESS_BASED_VERIFIER_CONTRACT_HASH:
+            abi = FALCON_VERIFIER_ABI
+        elif class_hash_hex == ESCROW_CONTRACT_HASH:
+            abi = FALCON_ESCROW_ABI
         else:
-            # If still no address, rely on precomputed but warn heavily.
-            print(
-                f"Transaction accepted. Using precomputed address: {hex(expected_address)}. (Could not parse address from UDC events or receipt details)"
-            )
-            return hex(expected_address), hex(resp.transaction_hash)
+            raise ValueError(f"Unknown contract class hash: {class_hash_hex}")
+        
+        deploy_result = await Contract.deploy_contract_v3(
+            account=deployer_account,
+            class_hash=class_hash_int,
+            abi=abi,
+            constructor_args=prepared_constructor_calldata,
+            auto_estimate=True
+        )
+
+        await deploy_result.wait_for_acceptance()
+        contract = deploy_result.deployed_contract
+        contract_address = hex(contract.address)
+        
+        # If this is an escrow contract, set the message points
+        if class_hash_hex == ESCROW_CONTRACT_HASH:
+            print("Setting message points for escrow contract...")
+            
+            tx_hash, error = await call_msg_points(contract_address,deployer_account, MSG_POINT)
+            tx_hash, error = await Stark_Token_Approve("0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d",contract_address,deployer_account, constructor_args[1])
+            tx_hash, error = await deposit_stark_token(contract_address,deployer_account)
+            if error:
+                print(f"Warning: Failed to set message points: {error}")
+            else:
+                print(f"Successfully set message points. Transaction hash: {tx_hash}")
+        
+        return contract_address, hex(deploy_result.hash)
 
     except Exception as e:
         print(f"Error during contract deployment: {e}")
         traceback.print_exc()
         return f"Deployment Error: {e}", None
+
+
+async def call_msg_points(
+    contract_address: str,
+    deployer_account,
+    msg_points: List[int]
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Calls the set_message_points function on the escrow contract.
+    Args:
+        contract_address: The hex address of the escrow contract
+        msg_points: List of u16 integers representing the message points
+    Returns:
+        Tuple of (transaction_hash_hex, error_message)
+    """
+    try:
+        contract_address_int = _hex_str_to_int(contract_address)
+        
+       
+    
+        # Create contract instance with escrow ABI
+        contract = Contract(
+            address=contract_address_int,
+            abi=FALCON_ESCROW_ABI,
+            provider=deployer_account
+        )
+        
+        # Call set_message_points with the msg_points array
+        invoke_result = await contract.functions["set_message_points"].invoke_v3(
+            msg_points,
+            auto_estimate=True
+        )
+        
+        await invoke_result.wait_for_acceptance()
+        print(f"Successfully set message points. Transaction hash: {hex(invoke_result.hash)}")
+        return hex(invoke_result.hash), None
+        
+    except Exception as e:
+        print(f"Error in call_msg_points: {e}")
+        traceback.print_exc()
+        return None, f"Error: {str(e)}"
+
+
+async def Stark_Token_Approve(
+    stark_contract_address: str,
+    escrow_contract_address: str,
+    deployer_account,
+    amount: int
+):
+    try:
+        stark_contract_address_int = _hex_str_to_int(stark_contract_address)
+        escrow_contract_address_int = _hex_str_to_int(escrow_contract_address)
+
+        stark_contract = await Contract.from_address(provider=deployer_account, address=stark_contract_address_int)
+
+        invoke_result = await stark_contract.functions["approve"].invoke_v3(
+            escrow_contract_address_int,
+            amount,
+            auto_estimate=True
+        )
+
+        await invoke_result.wait_for_acceptance()
+        print(f"Successfully approved. Transaction hash: {hex(invoke_result.hash)}")
+        return hex(invoke_result.hash), None
+    except Exception as e:
+        print(f"Error in Stark_Token_Approve: {e}")
+        traceback.print_exc()
+        return None, f"Error: {str(e)}"
+
+
+async def deposit_stark_token(
+    
+    escrow_contract_address: str,
+    deployer_account,
+  
+):
+    try:
+        escrow_contract_address_int = _hex_str_to_int(escrow_contract_address)
+        # Create contract instance with escrow ABI
+        contract = Contract(
+            address=escrow_contract_address_int,
+            abi=FALCON_ESCROW_ABI,
+            provider=deployer_account
+        )
+        
+        # Call set_message_points with the msg_points array
+        invoke_result = await contract.functions["deposit"].invoke_v3(
+            
+            auto_estimate=True
+        )
+        
+        await invoke_result.wait_for_acceptance()
+        print(f"Successfully deposited. Transaction hash: {hex(invoke_result.hash)}")
+        return hex(invoke_result.hash), None
+    except Exception as e:
+        print(f"Error in deposit_stark_token: {e}")
+        traceback.print_exc()
+        return None, f"Error: {str(e)}"
